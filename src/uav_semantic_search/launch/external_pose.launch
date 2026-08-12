@@ -1,0 +1,11 @@
+<launch>
+  <!-- Start this instead of gazebo_pose_bridge after FAST-LIO2/SLAM is integrated. -->
+  <arg name="uav0_odom" default="/uav0/odom"/>
+  <arg name="uav1_odom" default="/uav1/odom"/>
+  <node pkg="uav_semantic_search" type="odom_pose_relay.py" name="uav0_odom_pose_relay" output="screen">
+    <param name="vehicle" value="uav0"/><param name="odom_topic" value="$(arg uav0_odom)"/>
+  </node>
+  <node pkg="uav_semantic_search" type="odom_pose_relay.py" name="uav1_odom_pose_relay" output="screen">
+    <param name="vehicle" value="uav1"/><param name="odom_topic" value="$(arg uav1_odom)"/>
+  </node>
+</launch>

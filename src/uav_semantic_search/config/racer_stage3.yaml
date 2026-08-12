@@ -1,0 +1,62 @@
+# Stage-3 centralized RACER-inspired cooperative exploration baseline.
+# All positions are in the shared ENU `map` frame. This configuration is deliberately
+# conservative for the current 0.20 m 2.5D occupancy map and narrow corridor world.
+racer_stage3:
+  # Lifecycle and replanning
+  # Legacy field retained for compatibility; actual bootstrap starts after both
+  # UAVs publish /uavX/mission/takeoff_ready.
+  startup_delay_sec: 0.0
+  post_takeoff_map_bootstrap_sec: 6.0
+  manager_tick_hz: 2.0
+  replan_period_sec: 3.0
+  map_change_cells_for_replan: 80
+  min_known_cells: 120
+  min_completion_known_fraction: 0.80
+  mission_goal_timeout_sec: 55.0
+  stop_on_confirmed_target: true
+
+  # Frontier extraction / candidate viewpoint generation
+  occupied_threshold: 65
+  # Conservative indoor clearance. 0.55m is rounded to three 0.20m cells,
+  # so A* keeps a roughly 0.60m exclusion zone around observed obstacles.
+  obstacle_inflation_m: 0.55
+  min_clearance_m: 0.60
+  min_frontier_length_m: 0.60
+  gain_radius_m: 3.20
+  frontier_sample_stride: 2
+  hgrid_size_m: 4.0
+  frontier_visualization_rate_hz: 1.0
+  frontier_marker_z_m: 0.20
+  ugv_frontier_marker_z_m: 0.12
+
+  # Free-space skeleton frontier-region labelling.
+  enable_topology_frontier_regions: true
+  topology_min_free_component_area_m2: 0.8
+  topology_spur_prune_length_m: 0.6
+  topology_min_branch_length_m: 0.4
+  topology_thinning_max_iterations: 500
+  topology_frontier_association_max_distance_m: 4.0
+  topology_high_confidence_distance_m: 1.5
+
+  # RViz diagnostics. Disabling the yellow skeleton only affects display; the
+  # topology computation and region labels remain enabled.
+  topology_show_skeleton: true
+  topology_show_junctions: true
+  topology_skeleton_point_scale_m: 0.08
+
+  # A* and mission waypoint conversion
+  nearest_free_search_cells: 25
+  astar_max_expansions: 30000
+  max_assignment_path_m: 35.0
+
+  # Centralized RACER-inspired utility
+  gain_weight: 0.040
+  frontier_weight: 1.20
+  path_cost_weight: 1.00
+  risk_weight: 6.00
+  zone_owner_bonus: 1.20
+  zone_foreign_penalty: 1.20
+  load_balance_weight: 0.80
+  min_assignment_separation_m: 2.20
+  revisit_radius_m: 1.50
+  revisit_penalty: 4.00

@@ -1,0 +1,24 @@
+# Stage-5 v0.5.8 corrected overlay.
+# VLM and deterministic fallback select candidate endpoints only. The A* route is
+# always recomputed after selection from the current robot pose and current map.
+vlm_semantic_search:
+  pause_gazebo_during_epoch: false
+
+  backend_fallback:
+    enabled: true
+    response_timeout_sec: 12.0
+    minimum_goal_displacement_m: 1.0
+
+  route_planner:
+    request_topic: /vlm/route_request
+    result_topic: /vlm/route_result
+    # Route geometry is intentionally absent from the VLM prompt/output.
+    recompute_from_current_pose: true
+    recompute_from_current_map: true
+
+  validator:
+    recheck_astar: true
+    reject_duplicate_candidate_assignment: true
+    fallback_mode: safe_nearest_candidate
+    assign_unassigned_robots: true
+    require_initial_uav_explore: true

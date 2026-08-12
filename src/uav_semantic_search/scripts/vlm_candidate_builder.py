@@ -1,0 +1,2249 @@
+#!/usr/bin/env python3
+"""Geometry-safe candidate generation for Stage-5 central VLM planning.
+
+This module retains FUEL-style frontier extraction only as a *feasibility and
+candidate-generation primitive*. It never selects the final assignment utility;
+the centralized VLM chooses among the resulting feasible candidates.
+"""
+from __future__ import annotations
+
+import math
+import os
+import sys
+from typing import Any, Dict, List, Optional, Tuple
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from vlm_common import GridView, grid_from_msg, pose_to_dict
+from frontier_core import (astar, build_passable_mask, extract_frontier_clusters,
+                           nearest_passable, path_length_m)
+from frontier_topology import (associate_frontier_clusters,
+                               build_free_space_topology)
+
+
+def _point_in_polygon(x: float, y: float, polygon: List[Dict[str, Any]]) -> bool:
+    """Ray-casting point-in-polygon; boundary is treated as inside."""
+    if not isinstance(polygon, list) or len(polygon) < 3:
+        return False
+    inside = False
+    j = len(polygon) - 1
+    for i, item in enumerate(polygon):
+        prev = polygon[j]
+        try:
+            xi, yi = float(item['x']), float(item['y'])
+            xj, yj = float(prev['x']), float(prev['y'])
+        except (KeyError, TypeError, ValueError):
+            return False
+        # Boundary tolerance.
+        cross = (x - xi) * (yj - yi) - (y - yi) * (xj - xi)
+        if abs(cross) < 1e-8 and min(xi, xj) - 1e-8 <= x <= max(xi, xj) + 1e-8 and min(yi, yj) - 1e-8 <= y <= max(yi, yj) + 1e-8:
+            return True
+        # The crossing condition guarantees ``yj != yi`` here; retain the
+        # denominator sign so descending polygon edges are handled correctly.
+        intersects = ((yi > y) != (yj > y)) and (
+            x < (xj - xi) * (y - yi) / (yj - yi) + xi)
+        if intersects:
+            inside = not inside
+        j = i
+    return inside
+
+
+def _active_human_regions(hri_context: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    if not isinstance(hri_context, dict):
+        return []
+    raw = hri_context.get('priority_regions', [])
+    if not isinstance(raw, list):
+        return []
+    regions: List[Dict[str, Any]] = []
+    for region in raw:
+        if not isinstance(region, dict) or not region.get('region_id'):
+            continue
+        polygon = region.get('polygon', region.get('points', []))
+        if not isinstance(polygon, list) or len(polygon) < 3:
+            continue
+        try:
+            priority = max(0.0, min(1.0, float(region.get('priority', 0.0))))
+            max_robots = max(1, int(region.get('max_robots', 1)))
+        except (TypeError, ValueError):
+            continue
+        regions.append({
+            'region_id': str(region['region_id']),
+            'polygon': polygon,
+            'priority': priority,
+            'mode': str(region.get('mode', 'soft')).lower(),
+            'max_robots': max_robots,
+        })
+    return regions
+
+
+def _annotate_human_priority(candidate: Dict[str, Any], regions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Attach operator-region metadata to a safe candidate endpoint."""
+    goal = candidate.get('goal', {})
+    try:
+        gx, gy = float(goal['x']), float(goal['y'])
+    except (KeyError, TypeError, ValueError):
+        candidate['human_priority_score'] = 0.0
+        candidate['human_priority_regions'] = []
+        candidate['inside_human_priority_region'] = False
+        return candidate
+    matched = [region for region in regions if _point_in_polygon(gx, gy, region['polygon'])]
+    matched.sort(key=lambda region: (0 if region['mode'] == 'hard' else 1, -region['priority'], region['region_id']))
+    candidate['human_priority_regions'] = [{
+        'region_id': region['region_id'],
+        'priority': round(region['priority'], 3),
+        'mode': region['mode'],
+        'max_robots': region['max_robots'],
+    } for region in matched]
+    candidate['human_priority_score'] = round(max((region['priority'] for region in matched), default=0.0), 3)
+    candidate['inside_human_priority_region'] = bool(matched)
+    candidate['human_priority_mode'] = 'hard' if any(region['mode'] == 'hard' for region in matched) else ('soft' if matched else 'none')
+    return candidate
+
+
+def _frontier_hri_key(candidate: Dict[str, Any]):
+    hard = int(str(candidate.get('human_priority_mode', 'none')).lower() == 'hard')
+    return (
+        -hard,
+        -float(candidate.get('human_priority_score', 0.0) or 0.0),
+        -float(candidate.get('frontier_utility', -1e9) or -1e9),
+        float(candidate.get('risk', 0.0) or 0.0),
+        float(candidate.get('path_length_m', 1e9) or 1e9),
+    )
+
+
+def _select_topology_diverse_frontiers(
+        candidates: List[Dict[str, Any]], limit: int, preferred_limit: int,
+        max_per_region: int, enabled: bool) -> List[Dict[str, Any]]:
+    """Bound a frontier catalog while preserving distinct topology regions.
+
+    Human-priority frontiers retain their existing reservation.  Remaining
+    slots are filled round-by-round: one candidate per topology region first,
+    then a second candidate per region, and so on.
+    """
+    if limit <= 0:
+        return []
+    ordered = sorted(candidates, key=_frontier_hri_key)
+    if not enabled:
+        return ordered[:limit]
+
+    selected: List[Dict[str, Any]] = []
+    selected_ids = set()
+    region_counts: Dict[str, int] = {}
+
+    def region_of(candidate: Dict[str, Any]) -> str:
+        region = candidate.get('topology_region_id')
+        if region:
+            return str(region)
+        # Old or topology-disabled candidates must not collapse into one group.
+        return 'candidate:%s' % str(candidate.get('id'))
+
+    def append(candidate: Dict[str, Any]) -> None:
+        cid = str(candidate.get('id'))
+        if cid in selected_ids or len(selected) >= limit:
+            return
+        region = region_of(candidate)
+        selected.append(candidate)
+        selected_ids.add(cid)
+        region_counts[region] = region_counts.get(region, 0) + 1
+
+    preferred = [c for c in ordered
+                 if float(c.get('human_priority_score', 0.0) or 0.0) > 0.0]
+    for candidate in preferred[:max(0, preferred_limit)]:
+        append(candidate)
+
+    maximum = max(1, int(max_per_region))
+    for round_capacity in range(1, maximum + 1):
+        for candidate in ordered:
+            if len(selected) >= limit:
+                break
+            region = region_of(candidate)
+            if region_counts.get(region, 0) >= round_capacity:
+                continue
+            append(candidate)
+
+    # A small map may expose fewer regions than catalog slots.  Preserve useful
+    # alternatives after the diversity quota has been satisfied.
+    for candidate in ordered:
+        append(candidate)
+    return selected[:limit]
+
+
+def _profile(robot: Dict[str, Any], racer: Dict[str, Any], heterogeneous: Dict[str, Any]) -> Dict[str, Any]:
+    if robot.get("type") == "ugv":
+        return {
+            "occupied_threshold": int(racer.get("occupied_threshold", 65)),
+            "inflation": float(heterogeneous.get("ugv_obstacle_inflation_m", 0.54)),
+            "min_clearance": float(heterogeneous.get("ugv_min_clearance_m", 0.52)),
+            "min_frontier": float(heterogeneous.get("ugv_min_frontier_length_m", 0.60)),
+            "gain_radius": float(heterogeneous.get("ugv_gain_radius_m", 2.2)),
+            "stride": int(heterogeneous.get("ugv_frontier_sample_stride", 1)),
+            "hgrid": float(heterogeneous.get("ugv_hgrid_size_m", 3.0)),
+            "nearest": int(heterogeneous.get("ugv_nearest_free_search_cells", 20)),
+            "max_exp": int(heterogeneous.get("ugv_astar_max_expansions", 30000)),
+            "max_path": float(heterogeneous.get("ugv_max_assignment_path_m", 24.0)),
+            "gain_weight": float(heterogeneous.get("ugv_gain_weight", 0.055)),
+            "frontier_weight": float(heterogeneous.get("ugv_frontier_weight", 1.00)),
+            "path_cost_weight": float(heterogeneous.get("ugv_path_cost_weight", 1.00)),
+            "risk_weight": float(heterogeneous.get("ugv_risk_weight", 7.00)),
+        }
+    return {
+        "occupied_threshold": int(racer.get("occupied_threshold", 65)),
+        "inflation": float(racer.get("obstacle_inflation_m", 0.55)),
+        "min_clearance": float(racer.get("min_clearance_m", 0.60)),
+        "min_frontier": float(racer.get("min_frontier_length_m", 0.60)),
+        "gain_radius": float(racer.get("gain_radius_m", 3.20)),
+        "stride": int(racer.get("frontier_sample_stride", 2)),
+        "hgrid": float(racer.get("hgrid_size_m", 4.0)),
+        "nearest": int(racer.get("nearest_free_search_cells", 25)),
+        "max_exp": int(racer.get("astar_max_expansions", 30000)),
+        "max_path": float(racer.get("max_assignment_path_m", 35.0)),
+        "gain_weight": float(racer.get("gain_weight", 0.040)),
+        "frontier_weight": float(racer.get("frontier_weight", 1.20)),
+        "path_cost_weight": float(racer.get("path_cost_weight", 1.00)),
+        "risk_weight": float(racer.get("risk_weight", 6.00)),
+    }
+
+
+def _robot_goal_z(robot: Dict[str, Any], current_pose: Any) -> float:
+    if robot.get("type") == "ugv":
+        return float(robot.get("base_height_m", 0.34))
+    # if current_pose is not None:
+    #     return float(current_pose.pose.position.z)
+    return float(robot.get("takeoff_height", 1.8))  # 固定飞机高度
+
+
+def _yaw_to(src: Tuple[float, float], dst: Tuple[float, float]) -> float:
+    return float(math.atan2(dst[1] - src[1], dst[0] - src[0]))
+
+
+def _grid_from_any(msg: Any) -> Optional[GridView]:
+    return grid_from_msg(msg)
+
+def _target_confidence(obj: Dict[str, Any]) -> float:
+    return float(
+        obj.get(
+            "target_confidence",
+            obj.get("confidence", 0.0),
+        ) or 0.0
+    )
+
+def _target_state(obj: Dict[str, Any]) -> str:
+    return str(
+        obj.get(
+            "target_state",
+            obj.get("state", ""),
+        )
+    ).upper()
+
+def _is_suspected_target(
+        obj: Dict[str, Any],
+        min_confidence: float
+) -> bool:
+    label = str(obj.get("label", "")).lower()
+    category = str(obj.get("category", "")).lower()
+
+    is_query_target = (
+        label == "target_candidate"
+        or category == "query_target"
+    )
+
+    state = _target_state(obj)
+    confidence = _target_confidence(obj)
+
+    # state 缺失时兼容旧语义地图；
+    # 明确 NONE / UNKNOWN 的对象不应作为目标候选。
+    valid_state = state not in ("NONE", "UNKNOWN")
+
+    return (
+        is_query_target
+        and valid_state
+        and confidence >= min_confidence
+    )
+
+def _target_state_rank(state: str) -> int:
+    return {
+        "NONE": 0,
+        "POSSIBLE": 1,
+        "LIKELY": 2,
+        "CONFIRMED": 3,
+    }.get(str(state).upper(), 1)
+
+def _catalog_sort_key(candidate: Dict[str, Any]):
+    """Hard candidate-tier ordering.
+
+    Tier 0: target candidate
+    Tier 1: FUEL-style exploration frontier
+    Tier 2: ordinary semantic inspection
+    Tier 3: scan/hold
+    """
+
+    tier = int(candidate.get("priority_tier", 99))
+
+    target_conf = float(
+        candidate.get("target_confidence", 0.0) or 0.0
+    )
+
+    target_state = _target_state_rank(
+        candidate.get("target_state", "")
+    )
+
+    utility = float(
+        candidate.get("frontier_utility", -1e9) or -1e9
+    )
+
+    confidence = float(
+        candidate.get("confidence", 0.0) or 0.0
+    )
+
+    risk = float(
+        candidate.get("risk", 0.0) or 0.0
+    )
+
+    path_length = float(
+        candidate.get("path_length_m", 1e9) or 1e9
+    )
+
+    if tier == 0:
+        return (
+            0,
+            -target_state,
+            -target_conf,
+            risk,
+            path_length,
+        )
+
+    if tier == 1:
+        candidate_class = str(
+            candidate.get('candidate_class', '')
+        )
+
+        is_hri_region = int(
+            candidate_class in (
+                'HRI_REGION_SEARCH',
+                'HRI_REGION_PERIMETER_SCAN',
+            )
+        )
+
+        human_score = float(
+            candidate.get('human_priority_score', 0.0) or 0.0
+        )
+
+        human_hard = int(
+            str(candidate.get('human_priority_mode', 'none')).lower()
+            == 'hard'
+        )
+
+        rescan_rank = {
+            'SEMANTIC_RESCAN': 3,
+            'QUERY_RESCAN_SEMANTIC_ANCHOR': 3,
+            'QUERY_RESCAN_COVERAGE': 2,
+            'QUERY_RESCAN_FREE_SPACE': 1,
+        }.get(candidate_class, 0)
+
+        task_type = str(candidate.get('task_type', '')).upper()
+
+        is_frontier = (
+            task_type == 'EXPLORE'
+            or candidate_class == 'FRONTIER'
+        )
+
+        is_query_rescan = (
+            task_type == 'QUERY_RESCAN'
+            or candidate_class in (
+                'SEMANTIC_RESCAN',
+                'QUERY_RESCAN_SEMANTIC_ANCHOR',
+                'QUERY_RESCAN_COVERAGE',
+                'QUERY_RESCAN_FREE_SPACE',
+            )
+        )
+
+        # 非 HRI 的 Tier 1 候选中：
+        # EXPLORE Frontier > QUERY_RESCAN > 其他候选
+        action_rank = (
+            0 if is_frontier
+            else 1 if is_query_rescan
+            else 2
+        )
+
+        return (
+            1,
+            -is_hri_region,
+            -human_hard,
+            -human_score,
+            action_rank,
+            -utility,
+            -rescan_rank,
+            risk,
+            path_length,
+        )
+
+    if tier == 2:
+        return (
+            2,
+            -confidence,
+            risk,
+            path_length,
+        )
+
+    return (
+        3,
+        path_length,
+    )
+
+def _object_candidates(
+        robot: Dict[str, Any],
+        grid: GridView,
+        passable,
+        start_cell,
+        current_pose: Any,
+        overlay: Dict[str, Any],
+        profile: Dict[str, Any],
+        max_objects: int,
+        target_min_confidence: float,
+        ground_verify_min_confidence: float
+) -> List[Dict[str, Any]]:
+    """Generate Tier-0 target candidates and Tier-2 generic semantic candidates."""
+
+    candidates: List[Dict[str, Any]] = []
+
+    if current_pose is None:
+        return candidates
+
+    current_query_version = int((overlay.get("query", {}) or {}).get("query_version", -1))
+    objects = [
+        obj for obj in overlay.get("objects", [])
+        if isinstance(obj, dict)
+        and (str(obj.get("label", "")) != "target_candidate"
+             or int(obj.get("query_version", current_query_version)) == current_query_version)
+    ]
+
+    # 先检查真正的 target_candidate，避免被普通 obstacle 的插入顺序淹没。
+    objects.sort(
+        key=lambda obj: (
+            0 if _is_suspected_target(
+                obj,
+                target_min_confidence,
+            ) else 1,
+            -_target_confidence(obj),
+            -float(obj.get("confidence", 0.0) or 0.0),
+        )
+    )
+
+    for obj in objects[:max(0, int(max_objects))]:
+        pos = obj.get("position_map") or {}
+
+        if (
+            not isinstance(pos, dict)
+            or "x" not in pos
+            or "y" not in pos
+        ):
+            continue
+
+        cell = grid.world_to_cell(
+            float(pos["x"]),
+            float(pos["y"]),
+        )
+
+        if cell is None:
+            continue
+
+        goal_cell = nearest_passable(
+            passable,
+            cell,
+            profile["nearest"],
+        )
+
+        if goal_cell is None:
+            continue
+
+        path = astar(
+            passable,
+            start_cell,
+            goal_cell,
+            profile["max_exp"],
+        )
+
+        if path is None:
+            continue
+
+        plen = path_length_m(
+            path,
+            grid.resolution,
+        )
+
+        # if plen > profile["max_path"]:
+        #     continue
+        # max_path > 0：保留原来的最大分配距离限制。
+        # max_path <= 0：不限制路径长度，只要求 A* 可达。
+        max_path = float(
+            profile.get("max_path", 0.0)
+        )
+
+        if max_path > 0.0 and plen > max_path:
+            continue
+
+        gx, gy = grid.cell_to_world(goal_cell)
+
+        label = str(obj.get("label", "object"))
+        semantic_confidence = float(
+            obj.get("confidence", 0.0) or 0.0
+        )
+
+        target_confidence = _target_confidence(obj)
+        target_state = _target_state(obj)
+
+        is_target = _is_suspected_target(
+            obj,
+            target_min_confidence,
+        )
+
+        if is_target:
+            # 不再用 INSPECT 同时表示“疑似目标核验”和“普通语义物体查看”。
+            # 疑似目标：UAV 走 AERIAL_INSPECT，UGV 走 GROUND_VERIFY；
+            # 普通语义物体：仍保留为 tier-2 INSPECT，但默认配置关闭。
+            task_type = (
+                "GROUND_VERIFY"
+                if robot.get("type") == "ugv"
+                else "AERIAL_INSPECT"
+            )
+
+            priority_tier = 0
+            candidate_class = "TARGET"
+
+        else:
+            task_type = "INSPECT"
+            priority_tier = 2
+            candidate_class = "SEMANTIC_OBJECT"
+
+        candidates.append({
+            "id": "%s_OBJ_%s_%s" % (
+                robot["name"],
+                str(obj.get("object_id", "x")),
+                task_type,
+            ),
+            "robot_id": robot["name"],
+            "robot_type": robot.get("type"),
+
+            "task_type": task_type,
+            "priority_tier": priority_tier,
+            "candidate_class": candidate_class,
+
+            "semantic_anchor": {
+                "object_id": obj.get("object_id"),
+                "label": label,
+                "appearance_color": obj.get(
+                    "appearance_color",
+                    "unknown",
+                ),
+                "navigation_effect": obj.get(
+                    "navigation_effect",
+                    "none",
+                ),
+            },
+
+            "target_confidence": round(
+                target_confidence,
+                3,
+            ),
+            "target_state": (
+                target_state
+                if is_target
+                else "NONE"
+            ),
+
+            "query_version": int(obj.get("query_version", current_query_version)),
+
+            "confidence": round(
+                semantic_confidence,
+                3,
+            ),
+
+            "goal": {
+                "x": round(gx, 3),
+                "y": round(gy, 3),
+                "z": round(
+                    _robot_goal_z(
+                        robot,
+                        current_pose,
+                    ),
+                    3,
+                ),
+                "yaw_rad": 0.0,
+            },
+
+            "path_length_m": round(
+                plen,
+                3,
+            ),
+
+            "information_gain": 0.0,
+            "frontier_utility": 0.0,
+            "risk": 0.0,
+
+            "reason": (
+                "localized suspected target verification point"
+                if is_target
+                else "reachable inspection point for ordinary semantic object %s"
+                % label
+            ),
+        })
+
+    return candidates
+
+def _history_rescan_candidates(
+        robot: Dict[str, Any],
+        grid: GridView,
+        passable,
+        start_cell,
+        current_pose: Any,
+        overlay: Dict[str, Any],
+        profile: Dict[str, Any],
+        cfg: Dict[str, Any],
+        current_query_version: int
+) -> List[Dict[str, Any]]:
+    """Generate QUERY_RESCAN candidates from historical semantic observations.
+
+    These candidates are used after target-query switching.  A region may be
+    geometrically explored, but it has not necessarily been semantically checked
+    under the new target description.
+    """
+
+    candidates: List[Dict[str, Any]] = []
+
+    if current_pose is None:
+        return candidates
+
+    history = overlay.get('observation_history', [])
+    if not isinstance(history, list) or not history:
+        return candidates
+
+    max_candidates = int(
+        cfg.get('max_query_rescan_candidates_per_robot', 4)
+    )
+
+    if max_candidates <= 0:
+        return candidates
+
+    spacing_m = float(
+        cfg.get('query_rescan_min_spacing_m', 2.0)
+    )
+
+    spacing_cells = max(
+        1,
+        int(round(spacing_m / max(1e-6, float(grid.resolution))))
+    )
+
+    max_path = float(
+        cfg.get('query_rescan_max_path_m', profile['max_path'])
+    )
+
+    base_score = float(
+        cfg.get('query_rescan_base_score', 30.0)
+    )
+
+    path_weight = float(
+        cfg.get('query_rescan_path_cost_weight', 0.6)
+    )
+
+    sx = float(current_pose.pose.position.x)
+    sy = float(current_pose.pose.position.y)
+
+    def _near_existing(cell, cells) -> bool:
+        cx, cy = cell
+        for ox, oy in cells:
+            if (cx - ox) * (cx - ox) + (cy - oy) * (cy - oy) <= spacing_cells * spacing_cells:
+                return True
+        return False
+
+    # 当前 query_version 下已经看过的位置，不需要马上重复复查。
+    current_query_cells = []
+
+    for item in history:
+        if not isinstance(item, dict):
+            continue
+
+        if int(item.get('query_version', -1)) != int(current_query_version):
+            continue
+
+        pose_map = item.get('pose_map') or {}
+        if not isinstance(pose_map, dict) or 'x' not in pose_map or 'y' not in pose_map:
+            continue
+
+        cell = grid.world_to_cell(
+            float(pose_map['x']),
+            float(pose_map['y']),
+        )
+
+        if cell is not None:
+            current_query_cells.append(cell)
+
+    chosen_cells = []
+
+    # 越新的历史观测点越可能代表当前可达空间和有效视角，因此反向遍历。
+    for item in reversed(history):
+        if len(candidates) >= max_candidates:
+            break
+
+        if not isinstance(item, dict):
+            continue
+
+        old_query_version = int(
+            item.get('query_version', -1)
+        )
+
+        # 已经是当前目标描述下的观测点，不再作为“目标切换重访”候选。
+        if old_query_version == int(current_query_version):
+            continue
+
+        pose_map = item.get('pose_map') or {}
+
+        if (
+            not isinstance(pose_map, dict)
+            or 'x' not in pose_map
+            or 'y' not in pose_map
+        ):
+            continue
+
+        raw_cell = grid.world_to_cell(
+            float(pose_map['x']),
+            float(pose_map['y']),
+        )
+
+        if raw_cell is None:
+            continue
+
+        # 如果这个历史点附近已经被当前 query_version 复查过，则跳过。
+        if _near_existing(raw_cell, current_query_cells):
+            continue
+
+        # 避免生成多个距离过近的重访点。
+        if _near_existing(raw_cell, chosen_cells):
+            continue
+
+        goal_cell = nearest_passable(
+            passable,
+            raw_cell,
+            profile['nearest'],
+        )
+
+        if goal_cell is None:
+            continue
+
+        path = astar(
+            passable,
+            start_cell,
+            goal_cell,
+            profile['max_exp'],
+        )
+
+        if path is None:
+            continue
+
+        plen = path_length_m(
+            path,
+            grid.resolution,
+        )
+
+        if plen > max_path:
+            continue
+
+        gx, gy = grid.cell_to_world(goal_cell)
+
+        yaw_rad = float(
+            pose_map.get(
+                'yaw_rad',
+                _yaw_to((gx, gy), (sx, sy)),
+            )
+        )
+
+        # 这里没有 frontier 信息增益，因此使用“目标切换重访分数”。
+        # 路径越短分数越高，但仍然保留足够权重让它进入候选目录。
+        rescan_score = base_score - path_weight * float(plen)
+
+        history_id = str(
+            item.get(
+                'history_id',
+                'history_%d' % len(candidates)
+            )
+        )
+
+        candidates.append({
+            'id': '%s_RESCAN_%02d' % (
+                robot['name'],
+                len(candidates),
+            ),
+
+            'robot_id': robot['name'],
+            'robot_type': robot.get('type'),
+
+            # 新任务类型：目标切换后的语义重访。
+            'task_type': 'QUERY_RESCAN',
+            'priority_tier': 1,
+            'candidate_class': 'SEMANTIC_RESCAN',
+
+            'semantic_anchor': {
+                'history_id': history_id,
+                'source_robot_id': item.get('robot_id'),
+                'source_robot_type': item.get('robot_type'),
+                'old_query_version': old_query_version,
+                'scene_summary': item.get('scene_summary', ''),
+            },
+
+            'target_confidence': 0.0,
+            'target_state': 'NONE',
+            'confidence': 0.0,
+
+            'goal': {
+                'x': round(gx, 3),
+                'y': round(gy, 3),
+                'z': round(
+                    _robot_goal_z(
+                        robot,
+                        current_pose,
+                    ),
+                    3,
+                ),
+                'yaw_rad': round(yaw_rad, 4),
+            },
+
+            'path_length_m': round(plen, 3),
+
+            'information_gain': 0.0,
+            'frontier_length_m': 0.0,
+            'frontier_utility': round(rescan_score, 3),
+            'risk': 0.0,
+
+            'reason': '目标描述变化后重访已探索区域',
+        })
+
+        chosen_cells.append(raw_cell)
+
+    candidates.sort(
+        key=lambda c: (
+            -float(c.get('frontier_utility', 0.0)),
+            float(c.get('path_length_m', 1e9)),
+        )
+    )
+
+    return candidates
+
+
+def _near_existing_cell(cell, cells, spacing_cells: int) -> bool:
+    cx, cy = int(cell[0]), int(cell[1])
+    limit2 = int(spacing_cells) * int(spacing_cells)
+    for ox, oy in cells:
+        if (cx - int(ox)) * (cx - int(ox)) + (cy - int(oy)) * (cy - int(oy)) <= limit2:
+            return True
+    return False
+
+
+def _make_query_rescan_candidate(
+        robot: Dict[str, Any],
+        grid: GridView,
+        passable,
+        start_cell,
+        current_pose: Any,
+        profile: Dict[str, Any],
+        cfg: Dict[str, Any],
+        goal_cell,
+        idx: int,
+        candidate_class: str,
+        reason: str,
+        source: Dict[str, Any],
+        score_bias: float = 0.0,
+) -> Optional[Dict[str, Any]]:
+    if goal_cell is None or current_pose is None:
+        return None
+
+    if not _cell_is_passable(passable, goal_cell):
+        goal_cell = nearest_passable(passable, goal_cell, profile['nearest'])
+
+    if goal_cell is None:
+        return None
+
+    path = astar(passable, start_cell, goal_cell, profile['max_exp'])
+    if path is None:
+        return None
+
+    plen = path_length_m(path, grid.resolution)
+    max_path = float(cfg.get('query_rescan_max_path_m', profile['max_path']))
+    if plen > max_path:
+        return None
+
+    gx, gy = grid.cell_to_world(goal_cell)
+    sx = float(current_pose.pose.position.x)
+    sy = float(current_pose.pose.position.y)
+
+    base_score = float(cfg.get('query_rescan_base_score', 30.0))
+    path_weight = float(cfg.get('query_rescan_path_cost_weight', 0.6))
+    utility = base_score + float(score_bias) - path_weight * float(plen)
+
+    return {
+        'id': '%s_RESCAN_%s_%02d' % (
+            robot['name'],
+            str(candidate_class).replace('QUERY_RESCAN_', ''),
+            idx,
+        ),
+        'robot_id': robot['name'],
+        'robot_type': robot.get('type'),
+        'task_type': 'QUERY_RESCAN',
+        'priority_tier': 1,
+        'candidate_class': candidate_class,
+        'semantic_anchor': source,
+        'target_confidence': 0.0,
+        'target_state': 'NONE',
+        'confidence': 0.0,
+        'goal': {
+            'x': round(gx, 3),
+            'y': round(gy, 3),
+            'z': round(_robot_goal_z(robot, current_pose), 3),
+            'yaw_rad': round(_yaw_to((gx, gy), (sx, sy)), 4),
+        },
+        'path_length_m': round(plen, 3),
+        'information_gain': 0.0,
+        'frontier_length_m': 0.0,
+        'frontier_utility': round(float(utility), 3),
+        'risk': 0.0,
+        'reason': reason,
+    }
+
+def _coverage_rescan_candidates(
+        robot,
+        grid,
+        passable,
+        start_cell,
+        current_pose,
+        overlay,
+        profile,
+        cfg,
+        current_query_version,
+        frontiers_available: bool = False,
+):
+    """Generate systematic QUERY_RESCAN candidates after target switching.
+
+    Priority rule:
+    1. If useful frontiers still exist, rescan candidates are retained but
+       down-weighted so that map expansion is still preferred.
+    2. If no useful frontier exists, semantic coverage and free-space rescan
+       become the main autonomous search candidates.
+    """
+
+    candidates: List[Dict[str, Any]] = []
+
+    if current_pose is None:
+        return candidates
+
+    max_candidates = int(
+        cfg.get('max_query_coverage_rescan_candidates_per_robot', 3)
+    )
+
+    if max_candidates <= 0:
+        return candidates
+
+    spacing_m = float(
+        cfg.get('query_coverage_rescan_min_spacing_m',
+                cfg.get('query_rescan_min_spacing_m', 2.0))
+    )
+
+    spacing_cells = max(
+        1,
+        int(round(spacing_m / max(1e-6, float(grid.resolution)))),
+    )
+
+    chosen_cells = []
+
+    # 当前 query 已经语义检查过的 cell，不需要马上重复重扫。
+    current_query_cells = []
+    coverage_cells = overlay.get('semantic_coverage_cells', [])
+
+    if isinstance(coverage_cells, list):
+        for item in coverage_cells:
+            if not isinstance(item, dict):
+                continue
+
+            try:
+                cell = (
+                    int(item.get('x')),
+                    int(item.get('y')),
+                )
+                qv = int(item.get('query_version', -1))
+            except (TypeError, ValueError):
+                continue
+
+            if qv == int(current_query_version):
+                current_query_cells.append(cell)
+
+    def _append_from_cell(
+            cell,
+            candidate_class,
+            reason,
+            source,
+            score_bias=0.0
+    ) -> None:
+        if len(candidates) >= max_candidates:
+            return
+
+        if cell is None:
+            return
+
+        if _near_existing_cell(cell, chosen_cells, spacing_cells):
+            return
+
+        if _near_existing_cell(cell, current_query_cells, spacing_cells):
+            return
+
+        candidate = _make_query_rescan_candidate(
+            robot=robot,
+            grid=grid,
+            passable=passable,
+            start_cell=start_cell,
+            current_pose=current_pose,
+            profile=profile,
+            cfg=cfg,
+            goal_cell=cell,
+            idx=len(candidates),
+            candidate_class=candidate_class,
+            reason=reason,
+            source=source,
+            score_bias=score_bias,
+        )
+
+        if candidate is not None:
+            candidates.append(candidate)
+            gcell = grid.world_to_cell(
+                candidate['goal']['x'],
+                candidate['goal']['y'],
+            )
+            chosen_cells.append(
+                gcell if gcell is not None else cell
+            )
+
+    # ------------------------------------------------------------
+    # 1. 历史语义锚点重扫。
+    # 有 frontier 时降低加分；无 frontier 时正常加分。
+    # ------------------------------------------------------------
+    if frontiers_available:
+        semantic_anchor_bonus = float(
+            cfg.get('query_semantic_anchor_rescan_bonus_with_frontier', -4.0)
+        )
+    else:
+        semantic_anchor_bonus = float(
+            cfg.get('query_semantic_anchor_rescan_bonus_no_frontier',
+                    cfg.get('query_semantic_anchor_rescan_bonus', 12.0))
+        )
+
+    objects = overlay.get('objects', [])
+
+    if isinstance(objects, list):
+        semantic_sources = []
+
+        for obj in objects:
+            if not isinstance(obj, dict):
+                continue
+
+            # 当前 query target 不在这里处理，target_candidate 由
+            # _object_candidates() 生成 AERIAL_INSPECT / GROUND_VERIFY。
+            if str(obj.get('category', '')).lower() == 'query_target':
+                continue
+
+            if str(obj.get('label', '')).lower() == 'target_candidate':
+                continue
+
+            pos = obj.get('position_map') or {}
+
+            if (
+                not isinstance(pos, dict)
+                or 'x' not in pos
+                or 'y' not in pos
+            ):
+                continue
+
+            semantic_sources.append(obj)
+
+        semantic_sources.sort(
+            key=lambda obj: -float(obj.get('confidence', 0.0) or 0.0)
+        )
+
+        for obj in semantic_sources:
+            if len(candidates) >= max_candidates:
+                break
+
+            pos = obj.get('position_map') or {}
+            cell = grid.world_to_cell(
+                float(pos['x']),
+                float(pos['y']),
+            )
+
+            _append_from_cell(
+                cell,
+                'QUERY_RESCAN_SEMANTIC_ANCHOR',
+                '目标切换后重扫历史语义锚点周边',
+                {
+                    'source': 'semantic_object',
+                    'object_id': obj.get('object_id'),
+                    'label': obj.get('label'),
+                    'old_confidence': obj.get('confidence'),
+                    'current_query_version': int(current_query_version),
+                },
+                score_bias=semantic_anchor_bonus,
+            )
+
+    # ------------------------------------------------------------
+    # 2. 旧 query 语义覆盖区域重扫。
+    # 有 frontier 时降低分数；无 frontier 时提高分数。
+    # ------------------------------------------------------------
+    if isinstance(coverage_cells, list):
+        if frontiers_available:
+            coverage_bonus = float(
+                cfg.get('query_coverage_rescan_bonus_with_frontier', -8.0)
+            )
+        else:
+            coverage_bonus = float(
+                cfg.get('query_coverage_rescan_bonus_no_frontier',
+                        cfg.get('query_coverage_rescan_bonus', 8.0))
+            )
+
+        old_cells = []
+
+        for item in coverage_cells:
+            if not isinstance(item, dict):
+                continue
+
+            try:
+                qv = int(item.get('query_version', -1))
+                cell = (
+                    int(item.get('x')),
+                    int(item.get('y')),
+                )
+            except (TypeError, ValueError):
+                continue
+
+            if qv == int(current_query_version):
+                continue
+
+            old_cells.append((qv, cell, item))
+
+        # 更近的旧 query_version 优先，例如从 query 1 切到 query 2 时，
+        # 优先复查 query 1 的覆盖区域。
+        old_cells.sort(key=lambda x: -x[0])
+
+        for qv, cell, item in old_cells:
+            if len(candidates) >= max_candidates:
+                break
+
+            _append_from_cell(
+                cell,
+                'QUERY_RESCAN_COVERAGE',
+                '目标切换后重扫旧目标描述下已覆盖区域',
+                {
+                    'source': 'semantic_coverage_cell',
+                    'old_query_version': qv,
+                    'current_query_version': int(current_query_version),
+                    'cell': [int(cell[0]), int(cell[1])],
+                    'last_robot': item.get('last_robot'),
+                    'last_epoch_id': item.get('last_epoch_id'),
+                },
+                score_bias=coverage_bonus,
+            )
+
+    # ------------------------------------------------------------
+    # 3. 已探索 free-space 补扫。
+    # 默认只在没有有效 frontier 时生成，避免压过地图扩展。
+    # ------------------------------------------------------------
+    free_space_only_no_frontier = bool(
+        cfg.get(
+            'query_free_space_only_when_no_effective_frontier',
+            True,
+        )
+    )
+
+    allow_free_space_rescan = (
+        bool(cfg.get('enable_query_free_space_rescan_candidates', True))
+        and (
+            not free_space_only_no_frontier
+            or not frontiers_available
+        )
+    )
+
+    if (
+        len(candidates) < max_candidates
+        and allow_free_space_rescan
+    ):
+        step_m = float(
+            cfg.get('query_free_space_rescan_sample_step_m', 3.0)
+        )
+
+        step = max(
+            1,
+            int(round(step_m / max(1e-6, float(grid.resolution)))),
+        )
+
+        min_disp_m = float(
+            cfg.get('query_free_space_rescan_min_displacement_m', 1.5)
+        )
+
+        free_space_bonus = float(
+            cfg.get('query_free_space_rescan_bonus_no_frontier',
+                    cfg.get('query_free_space_rescan_bonus', 4.0))
+        )
+
+        free_sources = []
+
+        for y in range(0, int(grid.height), step):
+            for x in range(0, int(grid.width), step):
+                cell = (x, y)
+
+                if not _cell_is_passable(passable, cell):
+                    continue
+
+                wx, wy = grid.cell_to_world(cell)
+
+                dx = wx - float(current_pose.pose.position.x)
+                dy = wy - float(current_pose.pose.position.y)
+                dist2 = dx * dx + dy * dy
+
+                if dist2 < min_disp_m * min_disp_m:
+                    continue
+
+                if _near_existing_cell(cell, chosen_cells, spacing_cells):
+                    continue
+
+                free_sources.append((dist2, cell))
+
+        # 先选较近的可达 free-space；后续仍由 A* 检查。
+        free_sources.sort(key=lambda x: x[0])
+
+        for _, cell in free_sources:
+            if len(candidates) >= max_candidates:
+                break
+
+            _append_from_cell(
+                cell,
+                'QUERY_RESCAN_FREE_SPACE',
+                '目标切换后重扫已探索自由空间',
+                {
+                    'source': 'known_free_space',
+                    'current_query_version': int(current_query_version),
+                    'cell': [int(cell[0]), int(cell[1])],
+                },
+                score_bias=free_space_bonus,
+            )
+
+    candidates.sort(
+        key=lambda c: (
+            -float(c.get('frontier_utility', 0.0) or 0.0),
+            float(c.get('path_length_m', 1e9) or 1e9),
+        )
+    )
+
+    return candidates[:max_candidates]
+
+def _cell_is_passable(passable, cell) -> bool:
+    """Robust passable-cell check for numpy boolean maps."""
+    if cell is None:
+        return False
+    try:
+        x, y = int(cell[0]), int(cell[1])
+        if y < 0 or x < 0:
+            return False
+        return bool(passable[y, x])
+    except Exception:
+        return False
+
+
+def _poly_xy(p):
+    if isinstance(p, dict):
+        return float(p['x']), float(p['y'])
+    return float(p[0]), float(p[1])
+
+
+def _polygon_centroid(poly):
+    if not poly:
+        return None
+    try:
+        pts = [_poly_xy(p) for p in poly]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return sum(xs) / float(len(xs)), sum(ys) / float(len(ys))
+    except Exception:
+        return None
+
+
+def _polygon_bounds(poly):
+    if not poly:
+        return None
+    try:
+        pts = [_poly_xy(p) for p in poly]
+        xs = [p[0] for p in pts]
+        ys = [p[1] for p in pts]
+        return min(xs), max(xs), min(ys), max(ys)
+    except Exception:
+        return None
+
+
+def _make_hri_region_candidate(
+        robot: Dict[str, Any],
+        grid: GridView,
+        current_pose: Any,
+        region: Dict[str, Any],
+        goal_cell,
+        start_cell,
+        passable,
+        profile: Dict[str, Any],
+        cfg: Dict[str, Any],
+        idx: int,
+        candidate_class: str,
+        reason: str
+) -> Optional[Dict[str, Any]]:
+    """Create one safe HRI region-search candidate from a selected goal cell."""
+
+    if goal_cell is None or current_pose is None:
+        return None
+
+    path = astar(
+        passable,
+        start_cell,
+        goal_cell,
+        profile['max_exp'],
+    )
+
+    if path is None:
+        return None
+
+    plen = path_length_m(
+        path,
+        grid.resolution,
+    )
+
+    max_path = float(
+        cfg.get(
+            'hri_region_max_path_m',
+            profile.get('max_path', 35.0),
+        )
+    )
+
+    if plen > max_path:
+        return None
+
+    gx, gy = grid.cell_to_world(goal_cell)
+
+    centroid = _polygon_centroid(region.get('polygon', []))
+    if centroid is not None:
+        yaw_rad = _yaw_to(
+            (gx, gy),
+            centroid,
+        )
+    else:
+        sx = float(current_pose.pose.position.x)
+        sy = float(current_pose.pose.position.y)
+        yaw_rad = _yaw_to(
+            (gx, gy),
+            (sx, sy),
+        )
+
+    region_priority = float(
+        region.get('priority', 0.8)
+    )
+
+    region_mode = str(
+        region.get('mode', 'soft')
+    ).lower()
+
+    hard_bonus = 30.0 if region_mode == 'hard' else 0.0
+
+    base_score = float(
+        cfg.get('hri_region_base_score', 80.0)
+    )
+
+    priority_weight = float(
+        cfg.get('hri_region_priority_weight', 40.0)
+    )
+
+    path_weight = float(
+        cfg.get('hri_region_path_cost_weight', 0.8)
+    )
+
+    utility = (
+        base_score
+        + hard_bonus
+        + priority_weight * region_priority
+        - path_weight * float(plen)
+    )
+
+    region_id = str(
+        region.get('region_id', 'human_region')
+    )
+
+    return {
+        'id': '%s_HRI_REGION_%s_%02d' % (
+            robot['name'],
+            region_id.replace('-', '_'),
+            idx,
+        ),
+
+        'robot_id': robot['name'],
+        'robot_type': robot.get('type'),
+
+        'task_type': 'HRI_REGION_SEARCH',
+        'candidate_class': candidate_class,
+
+        # 重要：tier=1，使其低于真实目标核验，但高于普通语义对象。
+        # 后续排序中会让 HRI 区域候选优先于普通 frontier。
+        'priority_tier': 1,
+
+        'goal': {
+            'x': round(gx, 3),
+            'y': round(gy, 3),
+            'z': round(
+                _robot_goal_z(
+                    robot,
+                    current_pose,
+                ),
+                3,
+            ),
+            'yaw_rad': round(
+                float(yaw_rad),
+                4,
+            ),
+        },
+
+        'path_length_m': round(
+            float(plen),
+            3,
+        ),
+
+        'information_gain': 0.0,
+        'frontier_length_m': 0.0,
+        'frontier_utility': round(
+            float(utility),
+            3,
+        ),
+        'risk': 0.0,
+
+        'target_confidence': 0.0,
+        'target_state': 'NONE',
+        'confidence': 0.0,
+
+        # 显式保存 HRI 区域信息，避免因为 goal 在区域外侧观察点而丢失优先区属性。
+        'inside_human_priority_region': True,
+        'human_priority_score': round(region_priority, 3),
+        'human_priority_mode': region_mode,
+        'human_priority_regions': [{
+            'region_id': region_id,
+            'priority': round(region_priority, 3),
+            'mode': region_mode,
+            'max_robots': int(region.get('max_robots', 1)),
+        }],
+
+        'semantic_anchor': {
+            'region_id': region_id,
+            'region_type': 'human_priority_region',
+            'region_mode': region_mode,
+            'region_priority': round(region_priority, 3),
+            'centroid': {
+                'x': round(float(centroid[0]), 3) if centroid else None,
+                'y': round(float(centroid[1]), 3) if centroid else None,
+            },
+        },
+
+        'reason': reason,
+    }
+
+
+def _hri_region_search_candidates(
+        robot: Dict[str, Any],
+        grid: GridView,
+        passable,
+        start_cell,
+        current_pose: Any,
+        profile: Dict[str, Any],
+        cfg: Dict[str, Any],
+        human_regions: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Generate safe candidate viewpoints from human-priority regions.
+
+    目的：
+    1. 人类框选区域后，即使区域内没有 frontier，也生成可达搜索点；
+    2. 若区域内存在自由空间，则优先选择区域内部自由点；
+    3. 若区域内部无可达自由点，则选择区域中心附近最近可通行点，
+       作为边界/外围观察点；
+    4. 不把障碍物中心、未知栅格或不可达点作为目标点。
+    """
+
+    candidates: List[Dict[str, Any]] = []
+
+    if not human_regions or current_pose is None:
+        return candidates
+
+    sample_step_m = float(
+        cfg.get('hri_region_sample_step_m', 0.6)
+    )
+
+    max_per_region = int(
+        cfg.get('max_hri_region_candidates_per_region_per_robot', 2)
+    )
+
+    if max_per_region <= 0:
+        return candidates
+
+    min_spacing_m = float(
+        cfg.get('hri_region_candidate_min_spacing_m', 1.2)
+    )
+
+    min_spacing_cells = max(
+        1,
+        int(round(min_spacing_m / max(1e-6, float(grid.resolution)))),
+    )
+
+    def _too_close(cell, chosen_cells) -> bool:
+        cx, cy = int(cell[0]), int(cell[1])
+        for ox, oy in chosen_cells:
+            if (cx - ox) * (cx - ox) + (cy - oy) * (cy - oy) <= min_spacing_cells * min_spacing_cells:
+                return True
+        return False
+
+    for region in human_regions:
+        poly = region.get('polygon', [])
+        if not isinstance(poly, list) or len(poly) < 3:
+            continue
+
+        bounds = _polygon_bounds(poly)
+        centroid = _polygon_centroid(poly)
+
+        if bounds is None or centroid is None:
+            continue
+
+        min_x, max_x, min_y, max_y = bounds
+
+        local_candidates: List[Dict[str, Any]] = []
+        chosen_cells = []
+
+        y = min_y
+        while y <= max_y:
+            x = min_x
+            while x <= max_x:
+                if not _point_in_polygon(x, y, poly):
+                    x += sample_step_m
+                    continue
+
+                cell = grid.world_to_cell(x, y)
+
+                if cell is None:
+                    x += sample_step_m
+                    continue
+
+                if not _cell_is_passable(passable, cell):
+                    x += sample_step_m
+                    continue
+
+                if _too_close(cell, chosen_cells):
+                    x += sample_step_m
+                    continue
+
+                candidate = _make_hri_region_candidate(
+                    robot=robot,
+                    grid=grid,
+                    current_pose=current_pose,
+                    region=region,
+                    goal_cell=cell,
+                    start_cell=start_cell,
+                    passable=passable,
+                    profile=profile,
+                    cfg=cfg,
+                    idx=len(local_candidates),
+                    candidate_class='HRI_REGION_SEARCH',
+                    reason='人类优先区域内的安全搜索点',
+                )
+
+                if candidate is not None:
+                    local_candidates.append(candidate)
+                    chosen_cells.append(cell)
+
+                if len(local_candidates) >= max_per_region:
+                    break
+
+                x += sample_step_m
+
+            if len(local_candidates) >= max_per_region:
+                break
+
+            y += sample_step_m
+
+        # 如果区域内部没有可达自由点，则找区域中心附近最近可通行点。
+        # 这类点可能位于区域边界外侧，用于观察不可进入区域。
+        if not local_candidates:
+            centroid_cell = grid.world_to_cell(
+                float(centroid[0]),
+                float(centroid[1]),
+            )
+
+            goal_cell = nearest_passable(
+                passable,
+                centroid_cell,
+                profile['nearest'],
+            )
+
+            candidate = _make_hri_region_candidate(
+                robot=robot,
+                grid=grid,
+                current_pose=current_pose,
+                region=region,
+                goal_cell=goal_cell,
+                start_cell=start_cell,
+                passable=passable,
+                profile=profile,
+                cfg=cfg,
+                idx=0,
+                candidate_class='HRI_REGION_PERIMETER_SCAN',
+                reason='人类优先区域附近的安全观察点',
+            )
+
+            if candidate is not None:
+                local_candidates.append(candidate)
+
+        local_candidates.sort(
+            key=lambda c: (
+                -float(c.get('human_priority_score', 0.0) or 0.0),
+                -float(c.get('frontier_utility', 0.0) or 0.0),
+                float(c.get('path_length_m', 1e9)),
+            )
+        )
+
+        candidates.extend(
+            local_candidates[:max_per_region]
+        )
+
+    return candidates
+
+def build_candidates(robots: List[Dict[str, Any]], maps: Dict[str, Any], poses: Dict[str, Any],
+                     overlay: Dict[str, Any], racer: Dict[str, Any], heterogeneous: Dict[str, Any],
+                     cfg: Dict[str, Any], hri_context: Optional[Dict[str, Any]] = None,
+                     planning_context: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    """Return safe candidate catalog for VLM selection.
+
+    `maps` uses keys `uav` and `ugv`, matching robot-specific geometry layers.
+    """
+    catalog: List[Dict[str, Any]] = []
+    human_regions = _active_human_regions(hri_context)
+
+    if not isinstance(planning_context, dict):
+        planning_context = {}
+
+    event_reason = str(
+        planning_context.get('event_reason', '')
+    )
+
+    current_query_version = int(
+        (overlay.get('query', {}) or {}).get(
+            'query_version',
+            planning_context.get('query_version', 0),
+        )
+    )
+
+    max_per_robot = int(cfg.get("max_candidates_per_robot", 6))
+    topology_cache: Dict[Tuple[Any, ...], Any] = {}
+    state_action_gate_enabled = bool(cfg.get('enable_state_action_gate', True))
+    for robot in robots:
+        rid = robot.get("name")
+        map_key = "ugv" if robot.get("type") == "ugv" else "uav"
+        grid = _grid_from_any(maps.get(map_key))
+        pose = poses.get(rid)
+        if grid is None or pose is None:
+            continue
+        profile = _profile(robot, racer, heterogeneous)
+        passable, _ = build_passable_mask(grid, profile["occupied_threshold"], profile["inflation"])
+        start = grid.world_to_cell(pose.pose.position.x, pose.pose.position.y)
+        if start is None:
+            continue
+        start = nearest_passable(passable, start, profile["nearest"])
+        if start is None:
+            continue
+
+        frontier_candidates: List[Dict[str, Any]] = []
+        max_frontiers = int(
+            cfg.get(
+                "max_frontier_candidates_per_robot",
+                max_per_robot,
+            )
+        )
+        max_targets = int(
+            cfg.get(
+                "max_target_candidates_per_robot",
+                2,
+            )
+        )
+        max_generic_inspections = int(
+            cfg.get(
+                "max_generic_inspection_candidates_per_robot",
+                2,
+            )
+        )
+        target_min_confidence = float(
+            cfg.get(
+                "target_candidate_min_confidence",
+                0.45,
+            )
+        )
+        ground_verify_min_confidence = float(
+            cfg.get(
+                "ground_verify_min_confidence",
+                0.75,
+            )
+        )
+
+        clusters, _ = extract_frontier_clusters(
+            grid,
+            occupied_threshold=profile["occupied_threshold"],
+            inflation_radius_m=profile["inflation"],
+            min_frontier_length_m=profile["min_frontier"],
+            gain_radius_m=profile["gain_radius"],
+            min_clearance_m=profile["min_clearance"],
+            hgrid_size_m=profile["hgrid"],
+            sample_stride=profile["stride"],
+        )
+
+        topology = None
+        topology_associations: Dict[int, Dict[str, Any]] = {}
+        if bool(cfg.get('enable_topology_frontier_regions', True)):
+            topology_layer = (
+                'ugv_topology' if robot.get('type') == 'ugv'
+                else 'uav_topology'
+            )
+            topology_key = (
+                map_key,
+                int(profile['occupied_threshold']),
+                round(float(profile['inflation']), 4),
+                int(grid.width), int(grid.height),
+                round(float(grid.resolution), 6),
+            )
+            topology = topology_cache.get(topology_key)
+            if topology is None:
+                topology = build_free_space_topology(
+                    passable=passable,
+                    resolution=grid.resolution,
+                    layer_id=topology_layer,
+                    min_free_component_area_m2=float(
+                        cfg.get('topology_min_free_component_area_m2', 0.8)),
+                    spur_prune_length_m=float(
+                        cfg.get('topology_spur_prune_length_m', 0.6)),
+                    min_branch_length_m=float(
+                        cfg.get('topology_min_branch_length_m', 0.4)),
+                    thinning_max_iterations=int(
+                        cfg.get('topology_thinning_max_iterations', 500)),
+                )
+                topology_cache[topology_key] = topology
+            topology_associations = associate_frontier_clusters(
+                clusters,
+                topology,
+                max_distance_m=float(
+                    cfg.get('topology_frontier_association_max_distance_m', 4.0)),
+                high_confidence_distance_m=float(
+                    cfg.get('topology_high_confidence_distance_m', 1.5)),
+            )
+            for cluster in clusters:
+                metadata = topology_associations.get(int(cluster.cluster_id), {})
+                for key, value in metadata.items():
+                    setattr(cluster, key, value)
+
+        sx, sy = pose.pose.position.x, pose.pose.position.y
+        # Candidate-order is only a bounded pre-filter; final VLM selection is
+        # deliberately not this score.
+        clusters.sort(key=lambda c: (-float(c.information_gain), float(c.risk)))
+        for cluster in clusters:
+            path = astar(
+                passable,
+                start,
+                cluster.viewpoint_cell,
+                profile["max_exp"],
+            )
+
+            # A* 无解才说明该 frontier 当前不可达。
+            if path is None:
+                continue
+
+            plen = path_length_m(
+                path,
+                grid.resolution,
+            )
+
+            # max_path > 0：限制最大路径长度。
+            # max_path <= 0：不限制路径长度，但仍要求 A* 可达。
+            max_path = float(
+                profile.get("max_path", 0.0)
+            )
+
+            if max_path > 0.0 and plen > max_path:
+                continue
+            gx, gy = grid.cell_to_world(cluster.viewpoint_cell)
+            frontier_length = float(
+                cluster.frontier_length_m
+            )
+
+            frontier_utility = (
+                profile["gain_weight"]
+                * float(cluster.information_gain)
+                + profile["frontier_weight"]
+                * frontier_length
+                - profile["path_cost_weight"]
+                * plen
+                - profile["risk_weight"]
+                * float(cluster.risk)
+            )
+
+            frontier_candidates.append({
+                "id": "%s_F_%d" % (rid, int(cluster.cluster_id)),
+                "robot_id": rid,
+                "robot_type": robot.get("type"),
+                "task_type": "EXPLORE",
+                "semantic_anchor": None,
+                "goal": {"x": round(gx, 3), "y": round(gy, 3), "z": round(_robot_goal_z(robot, pose), 3),
+                         "yaw_rad": 0.0},
+                "path_length_m": round(plen, 3),
+                "information_gain": round(float(cluster.information_gain), 2),
+                "risk": round(float(cluster.risk), 3),
+                "reason": "safe frontier viewpoint generated from robot-specific occupancy map",
+                "priority_tier": 1,
+                "candidate_class": "FRONTIER",
+                "target_confidence": 0.0,
+                "target_state": "NONE",
+                "confidence": 0.0,
+
+                "frontier_length_m": round(frontier_length, 3,),
+                "frontier_utility": round(frontier_utility, 3,),
+                "topology_region_id": cluster.topology_region_id,
+                "topology_branch_id": cluster.topology_branch_id,
+                "topology_layer": cluster.topology_layer,
+                "topology_association_distance_m": cluster.topology_association_distance_m,
+                "topology_confidence": cluster.topology_confidence,
+            })
+            # if len(local) >= max_per_robot:
+            #     break
+        
+        # Human regions are a candidate-level preference, never an unsafe
+        # direct-goal command.  Annotate only after A* feasibility has been proven.
+        for candidate in frontier_candidates:
+            _annotate_human_priority(candidate, human_regions)
+
+        # Preserve high-value human-priority frontiers, then fill the bounded
+        # catalog round-by-round across distinct skeleton branches.
+        preferred_limit = max(0, int(cfg.get("max_human_priority_frontiers_per_robot", 3)))
+        frontier_candidates = _select_topology_diverse_frontiers(
+            frontier_candidates,
+            limit=max_frontiers,
+            preferred_limit=preferred_limit,
+            max_per_region=int(
+                cfg.get('max_frontiers_per_topology_region_per_robot', 2)),
+            enabled=bool(cfg.get('enable_topology_diverse_prefilter', True)),
+        )
+
+        # # ------------------------------------------------------------
+        # # 判断当前是否仍然存在有效 frontier。
+        # # 目标切换后，如果还有高价值 frontier，则优先扩展地图；
+        # # 如果没有有效 frontier，再提高 QUERY_RESCAN_COVERAGE / FREE_SPACE 的作用。
+        # # ------------------------------------------------------------
+        # best_frontier_utility = max(
+        #     [
+        #         float(c.get('frontier_utility', -1e9) or -1e9)
+        #         for c in frontier_candidates
+        #     ],
+        #     default=-1e9,
+        # )
+
+        # frontiers_available = (
+        #     len(frontier_candidates)
+        #     >= int(cfg.get('query_rescan_frontier_min_count', 1))
+        #     and best_frontier_utility
+        #     >= float(cfg.get('query_rescan_frontier_utility_threshold', 5.0))
+        # )
+
+        # frontier_candidates 已经过安全点修正、A* 可达性和路径长度过滤。
+        # 因此只要列表非空，就说明该机器人仍有有效 Frontier。
+        # frontier_utility 只用于排序，不能决定是否删除 EXPLORE 动作。
+        frontiers_available = len(frontier_candidates) > 0
+
+        # ------------------------------------------------------------
+        # 新增：人类优先区域主动生成候选点。
+        # 作用：
+        # 1. 人类框选区域后，即使区域内没有 frontier，也生成可达搜索点；
+        # 2. 若区域内存在自由空间，则选择区域内部安全点；
+        # 3. 若区域内部没有自由空间，则选择区域附近最近可通行观察点；
+        # 4. 不直接把障碍物、墙体或未知栅格作为机器人目标点。
+        # ------------------------------------------------------------
+        hri_region_candidates: List[Dict[str, Any]] = []
+
+        if (
+            bool(cfg.get('enable_hri_region_search_candidates', True))
+            and human_regions
+        ):
+            hri_region_candidates = _hri_region_search_candidates(
+                robot=robot,
+                grid=grid,
+                passable=passable,
+                start_cell=start,
+                current_pose=pose,
+                profile=profile,
+                cfg=cfg,
+                human_regions=human_regions,
+            )
+
+            # 理论上 _hri_region_search_candidates 内部已经写入了
+            # human_priority_score / human_priority_regions 等字段。
+            # 这里再调用一次是为了兼容已有的 HRI 区域容量约束和排序逻辑。
+            for candidate in hri_region_candidates:
+                candidate['priority_tier'] = 1
+                candidate['task_type'] = 'HRI_REGION_SEARCH'
+
+                if candidate.get('candidate_class') not in (
+                    'HRI_REGION_SEARCH',
+                    'HRI_REGION_PERIMETER_SCAN',
+                ):
+                    candidate['candidate_class'] = 'HRI_REGION_SEARCH'
+
+                candidate['reason'] = candidate.get(
+                    'reason',
+                    '人类优先区域主动搜索点',
+                )
+
+        # ------------------------------------------------------------
+        # 当前 query 下的目标候选与普通语义候选。
+        # 必须放在 QUERY_RESCAN 之前，因为 rescan 是否生成需要知道
+        # 当前 query 是否已经有目标候选。
+        # ------------------------------------------------------------
+        object_candidates: List[Dict[str, Any]] = []
+
+        if bool(
+            cfg.get(
+                "include_semantic_inspection",
+                True,
+            )
+        ):
+            object_candidates = _object_candidates(
+                robot,
+                grid,
+                passable,
+                start,
+                pose,
+                overlay,
+                profile,
+                int(
+                    cfg.get(
+                        "max_inspection_objects",
+                        16,
+                    )
+                ),
+                target_min_confidence,
+                ground_verify_min_confidence,
+            )
+
+        for candidate in object_candidates:
+            _annotate_human_priority(candidate, human_regions)
+
+        target_candidates = [
+            candidate
+            for candidate in object_candidates
+            if int(candidate.get("priority_tier", 99)) == 0
+        ]
+
+        generic_candidates = [
+            candidate
+            for candidate in object_candidates
+            if int(candidate.get("priority_tier", 99)) == 2
+        ]
+
+        target_candidates.sort(
+            key=_catalog_sort_key
+        )
+
+        generic_candidates.sort(
+            key=_catalog_sort_key
+        )
+
+        has_current_target_candidate = (
+            len(target_candidates) > 0
+        )
+
+        confirmed_target_confidence = float(
+            cfg.get(
+                'confirmed_target_completion_confidence',
+                0.85,
+            )
+        )
+
+        has_confirmed_current_target = any(
+            str(candidate.get('target_state', '')).upper() == 'CONFIRMED'
+            or float(candidate.get('target_confidence', 0.0) or 0.0)
+            >= confirmed_target_confidence
+            for candidate in target_candidates
+        )
+
+        if (state_action_gate_enabled
+                and bool(cfg.get('stop_assignment_after_confirmed_target', True))
+                and has_confirmed_current_target):
+            # 当前 query 的目标已经确认。
+            # 不再生成探索/重扫/HRI 区域搜索候选，只保留一个原地观察候选，
+            # 或者直接让 catalog 不再给该机器人追加移动任务。
+            target_done_candidate = {
+                "id": "%s_TARGET_CONFIRMED_HOLD" % rid,
+                "robot_id": rid,
+                "robot_type": robot.get("type"),
+                "task_type": (
+                    "HOVER_AND_SCAN"
+                    if robot.get("type") == "uav"
+                    else "SCAN_IN_PLACE"
+                ),
+                "priority_tier": 3,
+                "candidate_class": "TARGET_CONFIRMED_HOLD",
+                "semantic_anchor": {
+                    "reason": "current query target already confirmed",
+                    "query_version": current_query_version,
+                },
+                "target_confidence": 0.0,
+                "target_state": "NONE",
+                "confidence": 0.0,
+                "goal": {
+                    "x": round(float(pose.pose.position.x), 3),
+                    "y": round(float(pose.pose.position.y), 3),
+                    "z": round(_robot_goal_z(robot, pose), 3),
+                    "yaw_rad": 0.0,
+                },
+                "path_length_m": 0.0,
+                "information_gain": 0.0,
+                "frontier_length_m": 0.0,
+                "frontier_utility": 0.0,
+                "risk": 0.0,
+                "reason": "当前目标已确认，保持当前位置等待新任务",
+            }
+
+            catalog.append(target_done_candidate)
+            continue
+
+        # ------------------------------------------------------------
+        # 目标描述切换后的已探索区域重访候选。
+        # 典型场景：红色目标搜索完成后，用户把目标改成蓝色目标；
+        # 此时地图中可能已经没有 frontier，因此需要重访历史观测点。
+        # ------------------------------------------------------------
+        rescan_candidates: List[Dict[str, Any]] = []
+
+        query_rescan_event_reasons = cfg.get(
+            'query_rescan_event_reasons',
+            ['TARGET_QUERY_CHANGE'],
+        )
+
+        if not isinstance(query_rescan_event_reasons, list):
+            query_rescan_event_reasons = ['TARGET_QUERY_CHANGE']
+
+        query_rescan_reasons = [
+            str(reason)
+            for reason in query_rescan_event_reasons
+        ]
+
+        no_frontier_rescan_reasons = cfg.get(
+            'no_frontier_query_rescan_event_reasons',
+            [
+                'VISUAL_NOVELTY',
+                'GOAL_REACHED',
+                'ROBOT_BLOCKED',
+                'MAP_FREE_SPACE_EXPANDED',
+                'NEW_OBSERVATION_SECTOR',
+                'TOPOLOGY_CUE_CHANGED',
+                'HRI_PRIORITY_REGION_UPDATE',
+                'INITIAL_CONTEXT_READY',
+            ],
+        )
+
+        if not isinstance(no_frontier_rescan_reasons, list):
+            no_frontier_rescan_reasons = []
+
+        no_frontier_rescan_reasons = [
+            str(reason)
+            for reason in no_frontier_rescan_reasons
+        ]
+
+        allow_query_switch_rescan = (
+            event_reason in query_rescan_reasons
+            and (
+                not state_action_gate_enabled
+                or (
+                    not frontiers_available
+                    and not has_current_target_candidate
+                    and not has_confirmed_current_target
+                )
+            )
+        )
+
+        allow_no_frontier_rescan = (
+            bool(cfg.get('enable_no_frontier_query_rescan', True))
+            and event_reason in no_frontier_rescan_reasons
+            and (
+                not state_action_gate_enabled
+                or (
+                    not frontiers_available
+                    and not has_current_target_candidate
+                    and not has_confirmed_current_target
+                )
+            )
+        )
+
+        if (
+            bool(cfg.get('enable_query_rescan_candidates', True))
+            and (
+                allow_query_switch_rescan
+                or allow_no_frontier_rescan
+            )
+        ):
+            # 1. 历史 local VLM 观测位姿重访。
+            rescan_candidates = _history_rescan_candidates(
+                robot,
+                grid,
+                passable,
+                start,
+                pose,
+                overlay,
+                profile,
+                cfg,
+                current_query_version,
+            )
+
+            # 2. 目标切换或无 frontier 且无目标候选时，
+            #    从历史语义锚点、旧 query 覆盖栅格和已探索 free-space 中生成覆盖重扫点。
+            rescan_candidates.extend(
+                _coverage_rescan_candidates(
+                    robot=robot,
+                    grid=grid,
+                    passable=passable,
+                    start_cell=start,
+                    current_pose=pose,
+                    overlay=overlay,
+                    profile=profile,
+                    cfg=cfg,
+                    current_query_version=current_query_version,
+                    frontiers_available=frontiers_available,
+                )
+            )
+
+            # 3. 去重并限制 QUERY_RESCAN 总数，避免挤掉 HRI/frontier 等备选。
+            unique_rescan = []
+            seen_rescan_ids = set()
+
+            for candidate in sorted(
+                    rescan_candidates,
+                    key=lambda c: (
+                        -float(c.get('frontier_utility', 0.0) or 0.0),
+                        float(c.get('path_length_m', 1e9) or 1e9),
+                    )):
+                cid = str(candidate.get('id'))
+
+                if cid in seen_rescan_ids:
+                    continue
+
+                unique_rescan.append(candidate)
+                seen_rescan_ids.add(cid)
+
+                if len(unique_rescan) >= int(
+                        cfg.get('max_query_rescan_total_candidates_per_robot', 6)
+                ):
+                    break
+
+            rescan_candidates = unique_rescan
+
+            for candidate in rescan_candidates:
+                _annotate_human_priority(
+                    candidate,
+                    human_regions,
+                )
+
+        # 关键顺序：
+        # Tier 0 target
+        # → Tier 1 frontier
+        # → Tier 2 ordinary semantic objects
+        if (
+            frontiers_available
+            and bool(cfg.get('query_rescan_prefer_frontiers_when_available', True))
+        ):
+            local = (
+                target_candidates[:max_targets]
+                + hri_region_candidates
+                + frontier_candidates
+                + rescan_candidates
+            )
+        else:
+            local = (
+                target_candidates[:max_targets]
+                + hri_region_candidates
+                + rescan_candidates
+                + frontier_candidates
+            )
+
+        if bool(
+            cfg.get(
+                "include_generic_semantic_inspection",
+                True,
+            )
+        ):
+            local.extend(
+                generic_candidates[
+                    :max_generic_inspections
+                ]
+            )
+
+        if bool(
+            cfg.get(
+                "include_scan_in_place",
+                True,
+            )
+        ):
+            p = pose.pose.position
+
+            local.append({
+                "id": "%s_SCAN_0" % rid,
+                "robot_id": rid,
+                "robot_type": robot.get("type"),
+
+                "task_type": (
+                    "HOVER_AND_SCAN"
+                    if robot.get("type") == "uav"
+                    else "SCAN_IN_PLACE"
+                ),
+
+                "priority_tier": 3,
+                "candidate_class": "SCAN",
+
+                "semantic_anchor": None,
+                "target_confidence": 0.0,
+                "target_state": "NONE",
+                "confidence": 0.0,
+
+                "goal": {
+                    "x": round(float(p.x), 3),
+                    "y": round(float(p.y), 3),
+                    "z": round(
+                        _robot_goal_z(robot, pose),
+                        3,
+                    ),
+                    "yaw_rad": 0.0,
+                },
+
+                "path_length_m": 0.0,
+                "information_gain": 0.0,
+                "frontier_utility": 0.0,
+                "risk": 0.0,
+
+                "reason": (
+                    "safe in-place active observation candidate"
+                ),
+            })
+            _annotate_human_priority(local[-1], human_regions)
+
+        # 最终硬优先级排序。
+        # 普通 obstacle INSPECT 永远不会排到 EXPLORE 前面。
+        local.sort(
+            key=_catalog_sort_key
+        )
+
+        catalog.extend(
+            local[:max_per_robot]
+        )
+
+    return catalog[:int(cfg.get("max_total_candidates", 18))]

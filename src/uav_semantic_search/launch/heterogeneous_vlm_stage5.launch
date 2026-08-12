@@ -1,0 +1,100 @@
+<launch>
+  <!-- Stage-5 VLM semantic-search mode. The Stage-4 FUEL baseline launch remains
+       unchanged at heterogeneous_fuel_stage3.launch. This launch replaces only
+       the high-level FUEL manager with the synchronous hierarchical VLM stack. -->
+  <arg name="autostart" default="true"/>
+  <arg name="uav0_fcu_url" default="udp://:24540@127.0.0.1:34580"/>
+  <arg name="uav1_fcu_url" default="udp://:24541@127.0.0.1:34581"/>
+  <arg name="enable_hsv_baseline_detector" default="false"/>
+  <arg name="record_metrics" default="false"/>
+  <arg name="metrics_dir" default="~/harp_sar_ws/experiment_results"/>
+  <arg name="run_name" default="heterogeneous_vlm_stage5"/>
+  <arg name="enable_topology_planning" default="true"/>
+  <arg name="enable_state_action_gate" default="true"/>
+
+  <arg name="experiment_config" default="$(find uav_semantic_search)/config/experiments/h1.yaml"/>
+
+  <rosparam command="load" file="$(find uav_semantic_search)/config/racer_stage3.yaml"/>
+  <rosparam command="load" file="$(find uav_semantic_search)/config/go2_nav.yaml"/>
+  <rosparam command="load" file="$(find uav_semantic_search)/config/vlm_semantic_search.yaml"/>
+
+  <!-- Reuse all robust Stage-2/Stage-4 sensing, mapping, MAVROS and UAV waypoint
+       execution nodes. The existing FUEL high-level manager is deliberately not launched. -->
+  <include file="$(find uav_semantic_search)/launch/stack.launch">
+    <arg name="experiment_config" value="$(arg experiment_config)"/>
+    <arg name="autostart" value="$(arg autostart)"/>
+    <arg name="start_demo" value="false"/>
+    <arg name="uav0_fcu_url" value="$(arg uav0_fcu_url)"/>
+    <arg name="uav1_fcu_url" value="$(arg uav1_fcu_url)"/>
+  </include>
+
+  <!-- 覆盖go2_nav、racer和VLM中的地图相关默认参数 -->
+  <rosparam command="load" file="$(arg experiment_config)"/>
+
+  <!-- Applied after all YAML files so command-line ablation flags always win. -->
+  <param name="/vlm_semantic_search/ablation/enable_topology_planning"
+         value="$(arg enable_topology_planning)"/>
+  <param name="/vlm_semantic_search/ablation/enable_state_action_gate"
+         value="$(arg enable_state_action_gate)"/>
+
+  <!-- Official Go2 navigation-level proxy and its independent ground map. -->
+  <node pkg="uav_semantic_search" type="go2_nav_spawner.py" name="go2_nav_spawner" output="screen"/>
+  <node pkg="uav_semantic_search" type="go2_pose_bridge.py" name="go2_pose_bridge" output="screen"/>
+  <group ns="ugv0">
+    <node pkg="uav_semantic_search" type="go2_kinematic_controller.py" name="go2_kinematic_controller" output="screen"/>
+    <node pkg="uav_semantic_search" type="ugv_waypoint_executor.py" name="ugv_waypoint_executor" output="screen">
+      <param name="robot" value="ugv0"/>
+    </node>
+  </group>
+  <node pkg="uav_semantic_search" type="ground_map_fuser.py" name="ground_map_fuser" output="screen"/>
+
+  <!-- Optional fixed-HSV detector retained only as an ablation/reference path.
+       Stage-5 VLM local perception itself supports dynamic text queries. -->
+  <group if="$(arg enable_hsv_baseline_detector)">
+    <group ns="uav0"><node pkg="uav_semantic_search" type="semantic_detector.py" name="semantic_detector" output="screen"><param name="vehicle" value="uav0"/></node></group>
+    <group ns="uav1"><node pkg="uav_semantic_search" type="semantic_detector.py" name="semantic_detector" output="screen"><param name="vehicle" value="uav1"/></node></group>
+    <group ns="ugv0"><node pkg="uav_semantic_search" type="semantic_detector.py" name="semantic_detector" output="screen"><param name="vehicle" value="ugv0"/></node></group>
+    <node pkg="uav_semantic_search" type="target_fusion_node.py" name="target_fusion_node" output="screen"/>
+  </group>
+
+  <!-- Online query, event-driven local VLM perception, sparse map-aligned semantic
+       overlay, centralized VLM coordination, safety validation and pause/resume. -->
+  <node pkg="uav_semantic_search" type="target_query_manager.py" name="target_query_manager" output="screen"/>
+  <node pkg="uav_semantic_search" type="semantic_overlay_node.py" name="semantic_overlay_node" output="screen"/>
+  <node pkg="uav_semantic_search" type="vlm_trigger_scheduler.py" name="vlm_trigger_scheduler" output="screen"/>
+  <group ns="uav0"><node pkg="uav_semantic_search" type="local_vlm_perception.py" name="local_vlm_perception" output="screen"><param name="robot" value="uav0"/></node></group>
+  <group ns="uav1"><node pkg="uav_semantic_search" type="local_vlm_perception.py" name="local_vlm_perception" output="screen"><param name="robot" value="uav1"/></node></group>
+  <group ns="ugv0"><node pkg="uav_semantic_search" type="local_vlm_perception.py" name="local_vlm_perception" output="screen"><param name="robot" value="ugv0"/></node></group>
+  <node pkg="uav_semantic_search" type="central_vlm_planner.py" name="central_vlm_planner" output="screen"/>
+  <node pkg="uav_semantic_search" type="vlm_plan_validator.py" name="vlm_plan_validator" output="screen"/>
+  <!-- VLM/fallback choose endpoint candidates only. This node reruns A* from the
+       current pose and current robot-specific map, then publishes Path waypoints. -->
+  <node pkg="uav_semantic_search" type="astar_route_planner.py" name="astar_route_planner" output="screen"/>
+  <!-- Deterministic FUEL-style endpoint fallback when a local/central VLM backend
+       times out after bounded retries. -->
+  <node pkg="uav_semantic_search" type="vlm_map_fallback_planner.py" name="vlm_map_fallback_planner" output="screen"/>
+  <node pkg="uav_semantic_search" type="vlm_sync_coordinator.py" name="vlm_sync_coordinator" output="screen"/>
+
+  <node if="$(arg record_metrics)" pkg="uav_semantic_search" type="search_metrics_logger.py"
+        name="search_metrics_logger" output="screen">
+    <param name="output_dir" value="$(arg metrics_dir)"/>
+    <param name="run_name" value="$(arg run_name)"/>
+    <param name="period_sec" value="0.10"/>
+
+     <!-- 实际速度达到0.03 m/s时认为机器人处于运动状态 -->
+     <param name="motion_speed_threshold_mps" value="0.03"/>
+
+     <!-- 运动状态保持时间，应略大于位姿消息周期 -->
+     <param name="motion_state_hold_sec" value="0.30"/>
+
+     <!-- 过滤毫米级定位抖动 -->
+     <param name="min_route_step_m" value="0.002"/>
+
+     <!-- 过滤明显的定位跳变 -->
+     <param name="max_route_step_m" value="1.0"/>
+    <!-- Local VLM emits NONE/POSSIBLE/LIKELY (not CONFIRMED). A LIKELY target
+         above the semantic-priority threshold therefore terminates the trial. -->
+    <param name="likely_success_confidence" value="0.75"/>
+    <param name="success_confidence" value="0.80"/>
+  </node>
+</launch>

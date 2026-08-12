@@ -1,0 +1,165 @@
+<?xml version='1.0'?>
+<sdf version='1.6'>
+  <model name='__MODEL_NAME__'>
+    <!-- Navigation-level proxy: no gait dynamics; pose is updated by go2_kinematic_controller.py. -->
+    <static>false</static>
+    <allow_auto_disable>false</allow_auto_disable>
+
+    <link name='base_link'>
+      <gravity>false</gravity>
+      <self_collide>false</self_collide>
+      <kinematic>true</kinematic>
+      <inertial><mass>12.0</mass><inertia><ixx>0.28</ixx><iyy>0.46</iyy><izz>0.52</izz></inertia></inertial>
+      <!-- Body envelope approximately follows Unitree Go2 proportions. -->
+      <collision name='body_collision'><pose>0 0 0 0 0 0</pose><geometry><box><size>0.70 0.34 0.25</size></box></geometry></collision>
+      <visual name='body_visual'><pose>0 0 0 0 0 0</pose><geometry><box><size>0.70 0.34 0.25</size></box></geometry><material><ambient>0.10 0.12 0.14 1</ambient><diffuse>0.18 0.20 0.23 1</diffuse><specular>0.25 0.25 0.25 1</specular></material></visual>
+      <visual name='head_visual'><pose>0.39 0 0.01 0 0 0</pose><geometry><box><size>0.12 0.28 0.16</size></box></geometry><material><ambient>0.06 0.07 0.08 1</ambient><diffuse>0.10 0.11 0.12 1</diffuse></material></visual>
+      <visual name='top_panel'><pose>0 0 0.14 0 0 0</pose><geometry><box><size>0.38 0.24 0.04</size></box></geometry><material><ambient>0.55 0.57 0.60 1</ambient><diffuse>0.60 0.62 0.65 1</diffuse></material></visual>
+      <!-- Stylized legs: visual envelope only, appropriate for a navigation-level model. -->
+      <visual name='leg_fl_upper'><pose>0.22 0.23 -0.15 0 0.48 0</pose><geometry><box><size>0.075 0.075 0.34</size></box></geometry><material><ambient>0.08 0.09 0.10 1</ambient><diffuse>0.12 0.13 0.14 1</diffuse></material></visual>
+      <visual name='leg_fr_upper'><pose>0.22 -0.23 -0.15 0 -0.48 0</pose><geometry><box><size>0.075 0.075 0.34</size></box></geometry><material><ambient>0.08 0.09 0.10 1</ambient><diffuse>0.12 0.13 0.14 1</diffuse></material></visual>
+      <visual name='leg_rl_upper'><pose>-0.22 0.23 -0.15 0 -0.48 0</pose><geometry><box><size>0.075 0.075 0.34</size></box></geometry><material><ambient>0.08 0.09 0.10 1</ambient><diffuse>0.12 0.13 0.14 1</diffuse></material></visual>
+      <visual name='leg_rr_upper'><pose>-0.22 -0.23 -0.15 0 0.48 0</pose><geometry><box><size>0.075 0.075 0.34</size></box></geometry><material><ambient>0.08 0.09 0.10 1</ambient><diffuse>0.12 0.13 0.14 1</diffuse></material></visual>
+      <visual name='foot_fl'><pose>0.30 0.32 -0.30 0 0 0</pose><geometry><sphere><radius>0.045</radius></sphere></geometry><material><ambient>0.04 0.04 0.04 1</ambient></material></visual>
+      <visual name='foot_fr'><pose>0.30 -0.32 -0.30 0 0 0</pose><geometry><sphere><radius>0.045</radius></sphere></geometry><material><ambient>0.04 0.04 0.04 1</ambient></material></visual>
+      <visual name='foot_rl'><pose>-0.30 0.32 -0.30 0 0 0</pose><geometry><sphere><radius>0.045</radius></sphere></geometry><material><ambient>0.04 0.04 0.04 1</ambient></material></visual>
+      <visual name='foot_rr'><pose>-0.30 -0.32 -0.30 0 0 0</pose><geometry><sphere><radius>0.045</radius></sphere></geometry><material><ambient>0.04 0.04 0.04 1</ambient></material></visual>
+    </link>
+
+    <link name='lidar_link'>
+      <pose>0.18 0 0.28 0 0 0</pose>
+      <gravity>false</gravity>
+      <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+      <visual name='lidar_visual'><geometry><cylinder><radius>0.055</radius><length>0.075</length></cylinder></geometry><material><ambient>0.06 0.07 0.08 1</ambient><diffuse>0.12 0.14 0.16 1</diffuse></material></visual>
+      <sensor name='go2_ground_3d_lidar' type='ray'>
+        <always_on>1</always_on><visualize>false</visualize><update_rate>10</update_rate>
+        <ray><scan><horizontal><samples>720</samples><resolution>1</resolution><min_angle>-3.1415926</min_angle><max_angle>3.1415926</max_angle></horizontal><vertical><samples>16</samples><resolution>1</resolution><min_angle>-0.6108652</min_angle><max_angle>0.3490659</max_angle></vertical></scan><range><min>0.18</min><max>12.0</max><resolution>0.02</resolution></range></ray>
+        <plugin name='go2_ground_ros_lidar' filename='libgazebo_ros_velodyne_laser.so'>
+          <robotNamespace>__ROBOT_NAMESPACE__</robotNamespace><topicName>lidar/points</topicName><frameName>__ROBOT_NAME__/lidar_link</frameName>
+          <min_range>0.18</min_range><max_range>12.0</max_range><gaussianNoise>0.005</gaussianNoise>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='lidar_joint' type='fixed'><parent>base_link</parent><child>lidar_link</child></joint>
+
+    <!-- Forward RGB-D camera for ground-level candidate detection and target
+         verification. The navigation-level Go2 controller updates base_link;
+         this fixed sensor link therefore follows the robot rigidly. -->
+    <link name='front_camera_link'>
+      <pose>0.42 0 0.05 0 0 0</pose>
+      <gravity>false</gravity>
+      <inertial><mass>0.06</mass><inertia><ixx>0.0002</ixx><iyy>0.0002</iyy><izz>0.0002</izz></inertia></inertial>
+      <visual name='front_camera_housing'>
+        <pose>0.02 0 0 0 0 0</pose>
+        <geometry><box><size>0.10 0.08 0.06</size></box></geometry>
+        <material><ambient>0.04 0.05 0.06 1</ambient><diffuse>0.10 0.12 0.14 1</diffuse></material>
+      </visual>
+      <sensor name='go2_front_rgbd' type='depth'>
+        <always_on>1</always_on><visualize>false</visualize><update_rate>15</update_rate>
+        <camera>
+          <horizontal_fov>1.3962634</horizontal_fov>
+          <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+          <clip><near>0.25</near><far>8.0</far></clip>
+        </camera>
+        <!-- The nested topic form deliberately matches the already-tested UAV
+             OpenNI/Kinect configuration in patch_px4_gazebo.py. -->
+        <plugin name='go2_front_ros_rgbd' filename='libgazebo_ros_openni_kinect.so'>
+          <robotNamespace>__ROBOT_NAMESPACE__</robotNamespace>
+          <cameraName>camera</cameraName>
+          <alwaysOn>true</alwaysOn><updateRate>15.0</updateRate>
+          <imageTopicName>camera/rgb/image_raw</imageTopicName>
+          <cameraInfoTopicName>camera/rgb/camera_info</cameraInfoTopicName>
+          <depthImageTopicName>camera/depth/image_raw</depthImageTopicName>
+          <depthImageCameraInfoTopicName>camera/depth/camera_info</depthImageCameraInfoTopicName>
+          <pointCloudTopicName>camera/depth/points</pointCloudTopicName>
+          <frameName>__ROBOT_NAME__/front_camera_link</frameName>
+          <pointCloudCutoff>0.25</pointCloudCutoff>
+          <pointCloudCutoffMax>8.0</pointCloudCutoffMax>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='front_camera_joint' type='fixed'><parent>base_link</parent><child>front_camera_link</child></joint>
+  </model>
+</sdf><?xml version='1.0'?>
+<sdf version='1.6'>
+  <model name='__MODEL_NAME__'>
+    <!-- Navigation-level proxy: no gait dynamics; pose is updated by go2_kinematic_controller.py. -->
+    <static>false</static>
+    <allow_auto_disable>false</allow_auto_disable>
+
+    <link name='base_link'>
+      <gravity>false</gravity>
+      <self_collide>false</self_collide>
+      <kinematic>true</kinematic>
+      <inertial><mass>12.0</mass><inertia><ixx>0.28</ixx><iyy>0.46</iyy><izz>0.52</izz></inertia></inertial>
+      <!-- Body envelope approximately follows Unitree Go2 proportions. -->
+      <collision name='body_collision'><pose>0 0 0 0 0 0</pose><geometry><box><size>0.70 0.34 0.25</size></box></geometry></collision>
+      <visual name='body_visual'><pose>0 0 0 0 0 0</pose><geometry><box><size>0.70 0.34 0.25</size></box></geometry><material><ambient>0.10 0.12 0.14 1</ambient><diffuse>0.18 0.20 0.23 1</diffuse><specular>0.25 0.25 0.25 1</specular></material></visual>
+      <visual name='head_visual'><pose>0.39 0 0.01 0 0 0</pose><geometry><box><size>0.12 0.28 0.16</size></box></geometry><material><ambient>0.06 0.07 0.08 1</ambient><diffuse>0.10 0.11 0.12 1</diffuse></material></visual>
+      <visual name='top_panel'><pose>0 0 0.14 0 0 0</pose><geometry><box><size>0.38 0.24 0.04</size></box></geometry><material><ambient>0.55 0.57 0.60 1</ambient><diffuse>0.60 0.62 0.65 1</diffuse></material></visual>
+      <!-- Stylized legs: visual envelope only, appropriate for a navigation-level model. -->
+      <visual name='leg_fl_upper'><pose>0.22 0.23 -0.15 0 0.48 0</pose><geometry><box><size>0.075 0.075 0.34</size></box></geometry><material><ambient>0.08 0.09 0.10 1</ambient><diffuse>0.12 0.13 0.14 1</diffuse></material></visual>
+      <visual name='leg_fr_upper'><pose>0.22 -0.23 -0.15 0 -0.48 0</pose><geometry><box><size>0.075 0.075 0.34</size></box></geometry><material><ambient>0.08 0.09 0.10 1</ambient><diffuse>0.12 0.13 0.14 1</diffuse></material></visual>
+      <visual name='leg_rl_upper'><pose>-0.22 0.23 -0.15 0 -0.48 0</pose><geometry><box><size>0.075 0.075 0.34</size></box></geometry><material><ambient>0.08 0.09 0.10 1</ambient><diffuse>0.12 0.13 0.14 1</diffuse></material></visual>
+      <visual name='leg_rr_upper'><pose>-0.22 -0.23 -0.15 0 0.48 0</pose><geometry><box><size>0.075 0.075 0.34</size></box></geometry><material><ambient>0.08 0.09 0.10 1</ambient><diffuse>0.12 0.13 0.14 1</diffuse></material></visual>
+      <visual name='foot_fl'><pose>0.30 0.32 -0.30 0 0 0</pose><geometry><sphere><radius>0.045</radius></sphere></geometry><material><ambient>0.04 0.04 0.04 1</ambient></material></visual>
+      <visual name='foot_fr'><pose>0.30 -0.32 -0.30 0 0 0</pose><geometry><sphere><radius>0.045</radius></sphere></geometry><material><ambient>0.04 0.04 0.04 1</ambient></material></visual>
+      <visual name='foot_rl'><pose>-0.30 0.32 -0.30 0 0 0</pose><geometry><sphere><radius>0.045</radius></sphere></geometry><material><ambient>0.04 0.04 0.04 1</ambient></material></visual>
+      <visual name='foot_rr'><pose>-0.30 -0.32 -0.30 0 0 0</pose><geometry><sphere><radius>0.045</radius></sphere></geometry><material><ambient>0.04 0.04 0.04 1</ambient></material></visual>
+    </link>
+
+    <link name='lidar_link'>
+      <pose>0.18 0 0.28 0 0 0</pose>
+      <gravity>false</gravity>
+      <inertial><mass>0.05</mass><inertia><ixx>0.0001</ixx><iyy>0.0001</iyy><izz>0.0001</izz></inertia></inertial>
+      <visual name='lidar_visual'><geometry><cylinder><radius>0.055</radius><length>0.075</length></cylinder></geometry><material><ambient>0.06 0.07 0.08 1</ambient><diffuse>0.12 0.14 0.16 1</diffuse></material></visual>
+      <sensor name='go2_ground_3d_lidar' type='ray'>
+        <always_on>1</always_on><visualize>false</visualize><update_rate>10</update_rate>
+        <ray><scan><horizontal><samples>720</samples><resolution>1</resolution><min_angle>-3.1415926</min_angle><max_angle>3.1415926</max_angle></horizontal><vertical><samples>16</samples><resolution>1</resolution><min_angle>-0.6108652</min_angle><max_angle>0.3490659</max_angle></vertical></scan><range><min>0.18</min><max>12.0</max><resolution>0.02</resolution></range></ray>
+        <plugin name='go2_ground_ros_lidar' filename='libgazebo_ros_velodyne_laser.so'>
+          <robotNamespace>__ROBOT_NAMESPACE__</robotNamespace><topicName>lidar/points</topicName><frameName>__ROBOT_NAME__/lidar_link</frameName>
+          <min_range>0.18</min_range><max_range>12.0</max_range><gaussianNoise>0.005</gaussianNoise>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='lidar_joint' type='fixed'><parent>base_link</parent><child>lidar_link</child></joint>
+
+    <!-- Forward RGB-D camera for ground-level candidate detection and target
+         verification. The navigation-level Go2 controller updates base_link;
+         this fixed sensor link therefore follows the robot rigidly. -->
+    <link name='front_camera_link'>
+      <pose>0.42 0 0.05 0 0 0</pose>
+      <gravity>false</gravity>
+      <inertial><mass>0.06</mass><inertia><ixx>0.0002</ixx><iyy>0.0002</iyy><izz>0.0002</izz></inertia></inertial>
+      <visual name='front_camera_housing'>
+        <pose>0.02 0 0 0 0 0</pose>
+        <geometry><box><size>0.10 0.08 0.06</size></box></geometry>
+        <material><ambient>0.04 0.05 0.06 1</ambient><diffuse>0.10 0.12 0.14 1</diffuse></material>
+      </visual>
+      <sensor name='go2_front_rgbd' type='depth'>
+        <always_on>1</always_on><visualize>false</visualize><update_rate>15</update_rate>
+        <camera>
+          <horizontal_fov>1.3962634</horizontal_fov>
+          <image><width>640</width><height>480</height><format>R8G8B8</format></image>
+          <clip><near>0.25</near><far>8.0</far></clip>
+        </camera>
+        <!-- The nested topic form deliberately matches the already-tested UAV
+             OpenNI/Kinect configuration in patch_px4_gazebo.py. -->
+        <plugin name='go2_front_ros_rgbd' filename='libgazebo_ros_openni_kinect.so'>
+          <robotNamespace>__ROBOT_NAMESPACE__</robotNamespace>
+          <cameraName>camera</cameraName>
+          <alwaysOn>true</alwaysOn><updateRate>15.0</updateRate>
+          <imageTopicName>camera/rgb/image_raw</imageTopicName>
+          <cameraInfoTopicName>camera/rgb/camera_info</cameraInfoTopicName>
+          <depthImageTopicName>camera/depth/image_raw</depthImageTopicName>
+          <depthImageCameraInfoTopicName>camera/depth/camera_info</depthImageCameraInfoTopicName>
+          <pointCloudTopicName>camera/depth/points</pointCloudTopicName>
+          <frameName>__ROBOT_NAME__/front_camera_link</frameName>
+          <pointCloudCutoff>0.25</pointCloudCutoff>
+          <pointCloudCutoffMax>8.0</pointCloudCutoffMax>
+        </plugin>
+      </sensor>
+    </link>
+    <joint name='front_camera_joint' type='fixed'><parent>base_link</parent><child>front_camera_link</child></joint>
+  </model>
+</sdf>

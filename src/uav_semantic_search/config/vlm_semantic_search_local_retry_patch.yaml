@@ -1,0 +1,27 @@
+# Stage-5 v0.5.7 bounded local VLM retry settings.
+# Apply with scripts/upgrade_stage5_v057_local_retry_config.py. Do not copy
+# this file over vlm_semantic_search.yaml because your active YAML may contain
+# a direct API key and experiment-specific endpoint/model settings.
+vlm_semantic_search:
+  pause_gazebo_during_epoch: false
+  skip_central_on_local_timeout: true
+  skip_central_on_local_failure: true
+  local_retry:
+    # Retry uses the exact same RGB snapshot and prompt from this epoch.
+    # No fresh camera image, resizing, JPEG-quality change, or token reduction.
+    enabled: true
+    max_retries: 1
+    attempt_timeout_sec: 35.0
+    total_deadline_sec: 75.0
+    initial_backoff_sec: 1.5
+    backoff_multiplier: 2.0
+    retry_on_timeout: true
+    retry_on_connection_errors: true
+    retry_on_http_429_5xx: true
+    snapshot_policy: identical_epoch_snapshot
+  local_dispatch:
+    mode: sequential
+    participant_order: [uav0, uav1, ugv0]
+    # Greater than total_deadline_sec so the coordinator does not preempt retry.
+    per_robot_response_timeout_sec: 80.0
+    inter_request_delay_sec: 0.30

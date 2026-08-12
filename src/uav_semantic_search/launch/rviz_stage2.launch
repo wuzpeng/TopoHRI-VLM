@@ -1,0 +1,4 @@
+<launch>
+  <arg name="config" default="$(find uav_semantic_search)/rviz/stage2_semantic_search.rviz"/>
+  <node pkg="rviz" type="rviz" name="rviz_stage2" args="-d $(arg config)" output="screen"/>
+</launch>

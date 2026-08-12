@@ -1,0 +1,133 @@
+# Shared ENU map coordinate system. Task-level goals and semantic target poses use frame_id: map.
+map:
+  frame_id: map
+  resolution: 0.20
+  width: 220
+  height: 140
+  origin_x: -6.0
+  origin_y: -14.0
+  z_min: 0.25
+  z_max: 2.75
+  lidar_max_range: 20.0
+  point_stride: 4
+  publish_rate: 2.0
+  free_increment: 1
+  occupied_increment: 5
+  occupied_ratio: 0.75
+
+vehicles:
+  - name: uav0
+    type: uav
+    gazebo_model: iris_0
+    lidar_topic: /uav0/lidar/points
+    lidar_frame_id: uav0/lidar_link
+    rgb_topic: /uav0/camera/camera/rgb/image_raw
+    depth_topic: /uav0/camera/camera/depth/image_raw
+    camera_info_topic: /uav0/camera/camera/rgb/camera_info
+    camera_optical_frame_id: uav0/camera_optical_frame
+    global_pose_topic: /uav0/global_pose
+    local_pose_topic: /uav0/mavros/local_position/pose
+    mavros_state_topic: /uav0/mavros/state
+    mission_goal_topic: /uav0/mission/goal
+    mission_reached_topic: /uav0/mission/reached
+    blocked_topic: /uav0/safety/blocked
+    setpoint_topic: /uav0/mavros/setpoint_position/local
+    lidar_xyz: [0.0, 0.0, 0.16]
+    lidar_rpy: [0.0, 0.0, 0.0]
+    camera_xyz: [0.18, 0.0, -0.04]
+    # ROS optical (x-right,y-down,z-forward) -> PX4 body FLU (x-forward,y-left,z-up).
+    camera_optical_to_body_rpy: [-1.57079632679, 0.0, -1.57079632679]
+    takeoff_height: 1.80
+    # The exploration manager cannot issue horizontal goals until this vertical
+    # climb is within tolerance and has remained stable for takeoff_hold_sec.
+    takeoff_tolerance_m: 0.18
+    takeoff_hold_sec: 2.0
+    yaw_control:
+      enabled: true
+      max_yaw_rate_rad_s: 0.55
+      yaw_tolerance_rad: 0.08
+    safety:
+      enabled: true
+      # Execution-layer LiDAR gate; independent of global occupancy/A*.
+      stop_distance_m: 0.90
+      half_width_m: 0.25
+      vertical_min_m: -0.45
+      vertical_max_m: 0.45
+      min_forward_m: 0.45
+      self_filter_radius_m: 0.45
+      min_goal_distance_m: 0.20
+      point_stride: 1
+      min_block_points: 12
+      block_confirm_frames: 2
+      clear_confirm_frames: 3
+
+  - name: uav1
+    type: uav
+    gazebo_model: iris_1
+    lidar_topic: /uav1/lidar/points
+    lidar_frame_id: uav1/lidar_link
+    rgb_topic: /uav1/camera/camera/rgb/image_raw
+    depth_topic: /uav1/camera/camera/depth/image_raw
+    camera_info_topic: /uav1/camera/camera/rgb/camera_info
+    camera_optical_frame_id: uav1/camera_optical_frame
+    global_pose_topic: /uav1/global_pose
+    local_pose_topic: /uav1/mavros/local_position/pose
+    mavros_state_topic: /uav1/mavros/state
+    mission_goal_topic: /uav1/mission/goal
+    mission_reached_topic: /uav1/mission/reached
+    blocked_topic: /uav1/safety/blocked
+    setpoint_topic: /uav1/mavros/setpoint_position/local
+    lidar_xyz: [0.0, 0.0, 0.16]
+    lidar_rpy: [0.0, 0.0, 0.0]
+    camera_xyz: [0.18, 0.0, -0.04]
+    camera_optical_to_body_rpy: [-1.57079632679, 0.0, -1.57079632679]
+    takeoff_height: 2.20
+    takeoff_tolerance_m: 0.18
+    takeoff_hold_sec: 2.0
+    yaw_control:
+      enabled: true
+      max_yaw_rate_rad_s: 0.55
+      yaw_tolerance_rad: 0.08
+    safety:
+      enabled: true
+      # Execution-layer LiDAR gate; independent of global occupancy/A*.
+      stop_distance_m: 0.90
+      half_width_m: 0.25
+      vertical_min_m: -0.45
+      vertical_max_m: 0.45
+      min_forward_m: 0.45
+      self_filter_radius_m: 0.45
+      min_goal_distance_m: 0.20
+      point_stride: 1
+      min_block_points: 12
+      block_confirm_frames: 2
+      clear_confirm_frames: 3
+
+semantic_detector:
+  target_class: victim_surrogate
+  publish_rate_hz: 5.0
+  min_area_px: 180
+  min_depth_m: 0.35
+  max_depth_m: 7.50
+  depth_patch_radius_px: 4
+  # HSV red masks, OpenCV H∈[0,179]. The Gazebo surrogate is bright red.
+  red_hsv_lower_1: [0, 100, 70]
+  red_hsv_upper_1: [10, 255, 255]
+  red_hsv_lower_2: [170, 100, 70]
+  red_hsv_upper_2: [179, 255, 255]
+  morphology_kernel_px: 5
+  position_std_base_m: 0.12
+  position_std_depth_scale: 0.03
+  # Maximum accepted time gap between RGB and independently cached depth frame.
+  max_rgb_depth_age_s: 0.50
+
+target_fusion:
+  association_radius_m: 1.20
+  publish_rate_hz: 2.0
+  stale_timeout_sec: 30.0
+  remove_timeout_sec: 90.0
+  verify_min_observations: 3
+  confirm_min_observations: 4
+  confirm_min_robots: 2
+  force_confirm_observations: 10
+  max_covariance_m2: 4.0

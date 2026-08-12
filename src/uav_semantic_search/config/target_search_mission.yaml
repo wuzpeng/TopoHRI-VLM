@@ -1,0 +1,20 @@
+# Stage-2 fixed semantic-search validation route.
+# uav1 enters the north room at x≈25 where the red victim_surrogate is placed.
+# The final uav1 waypoint faces +x, placing the target within the forward RGB-D camera field-of-view.
+mission:
+  uav0:
+    - {x: 2.0,  y: -0.70, z: 1.80, yaw_deg: 0.0}
+    - {x: 8.0,  y: -0.70, z: 1.80, yaw_deg: 0.0}
+    - {x: 14.0, y: -0.70, z: 1.80, yaw_deg: 0.0}
+    - {x: 20.0, y: -0.70, z: 1.80, yaw_deg: 0.0}
+    - {x: 27.0, y: -0.70, z: 1.80, yaw_deg: 0.0}
+  uav1:
+    - {x: 2.0,  y: 0.70, z: 2.20, yaw_deg: 0.0}
+    - {x: 12.0, y: 0.70, z: 2.20, yaw_deg: 0.0}
+    - {x: 22.8, y: 0.70, z: 2.20, yaw_deg: 0.0}
+    - {x: 24.8, y: 1.10, z: 2.20, yaw_deg: 1.5708}
+    - {x: 24.8, y: 3.40, z: 2.20, yaw_deg: 1.5708}
+    - {x: 23.8, y: 5.30, z: 1.80, yaw_deg: 0.0}
+    - {x: 26.0, y: 5.30, z: 1.80, yaw_deg: 0.0}
+hold_seconds: 1.5
+start_delay_seconds: 8.0

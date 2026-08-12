@@ -1,0 +1,46 @@
+<?xml version="1.0"?>
+<package format="2">
+  <name>uav_semantic_search</name>
+  <version>0.5.1</version>
+  <description>Stage-5 hierarchical VLM-guided UAV-UGV semantic search stack with Stage-4 FUEL baseline retained.</description>
+  <maintainer email="maintainer@example.com">uav_semantic_search maintainer</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>catkin</buildtool_depend>
+  <build_depend>message_generation</build_depend>
+  <build_depend>rospy</build_depend>
+  <build_depend>std_msgs</build_depend>
+  <build_depend>std_srvs</build_depend>
+  <build_depend>geometry_msgs</build_depend>
+  <build_depend>nav_msgs</build_depend>
+  <build_depend>sensor_msgs</build_depend>
+  <build_depend>visualization_msgs</build_depend>
+  <build_depend>gazebo_msgs</build_depend>
+  <build_depend>mavros_msgs</build_depend>
+  <build_depend>tf</build_depend>
+  <build_depend>tf2_ros</build_depend>
+  <build_depend>cv_bridge</build_depend>
+  <build_depend>image_transport</build_depend>
+  <build_depend>message_filters</build_depend>
+
+  <build_export_depend>message_runtime</build_export_depend>
+  <exec_depend>message_runtime</exec_depend>
+  <exec_depend>rospy</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>geometry_msgs</exec_depend>
+  <exec_depend>nav_msgs</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>visualization_msgs</exec_depend>
+  <exec_depend>gazebo_msgs</exec_depend>
+  <exec_depend>mavros_msgs</exec_depend>
+  <exec_depend>tf</exec_depend>
+  <exec_depend>tf2_ros</exec_depend>
+  <exec_depend>cv_bridge</exec_depend>
+  <exec_depend>image_transport</exec_depend>
+  <exec_depend>message_filters</exec_depend>
+  <exec_depend>gazebo_ros</exec_depend>
+  <exec_depend>gazebo_plugins</exec_depend>
+  <exec_depend>mavros</exec_depend>
+  <exec_depend>mavros_extras</exec_depend>
+</package>

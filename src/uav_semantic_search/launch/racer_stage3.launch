@@ -1,0 +1,31 @@
+<launch>
+  <!-- Stage-3 starts the complete Stage-2 sensing stack, but intentionally does NOT
+       start either fixed mission sequencer. autonomous_search_manager.py becomes the
+       only publisher of /uavX/mission/goal. -->
+  <arg name="autostart" default="true"/>
+  <arg name="record_metrics" default="false"/>
+  <arg name="metrics_dir" default="~/.ros/uav_semantic_search_metrics"/>
+  <arg name="run_name" default="racer_stage3"/>
+  <arg name="uav0_fcu_url" default="udp://:24540@127.0.0.1:34580"/>
+  <arg name="uav1_fcu_url" default="udp://:24541@127.0.0.1:34581"/>
+
+  <rosparam command="load" file="$(find uav_semantic_search)/config/racer_stage3.yaml"/>
+
+  <include file="$(find uav_semantic_search)/launch/semantic_stage2.launch">
+    <arg name="autostart" value="$(arg autostart)"/>
+    <arg name="uav0_fcu_url" value="$(arg uav0_fcu_url)"/>
+    <arg name="uav1_fcu_url" value="$(arg uav1_fcu_url)"/>
+  </include>
+
+  <!-- Diagnostic: shows all valid safe frontier viewpoints in RViz. -->
+  <node pkg="uav_semantic_search" type="frontier_extractor.py" name="frontier_extractor" output="screen"/>
+
+  <!-- Actual centralized RACER-inspired decision layer. -->
+  <node pkg="uav_semantic_search" type="autonomous_search_manager.py" name="autonomous_search_manager" output="screen"/>
+
+  <node if="$(arg record_metrics)" pkg="uav_semantic_search" type="search_metrics_logger.py"
+        name="search_metrics_logger" output="screen">
+    <param name="output_dir" value="$(arg metrics_dir)"/>
+    <param name="run_name" value="$(arg run_name)"/>
+  </node>
+</launch>

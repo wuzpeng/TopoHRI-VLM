@@ -1,0 +1,49 @@
+<launch>
+  <!-- Full Stage-4 heterogeneous search baseline: UAV FUEL/RACER-style frontier
+       exploration on /global_map_2d plus a Go2 navigation-level ground explorer
+       on its own near-ground occupancy map. -->
+  <arg name="autostart" default="true"/>
+  <arg name="uav0_fcu_url" default="udp://:24540@127.0.0.1:34580"/>
+  <arg name="uav1_fcu_url" default="udp://:24541@127.0.0.1:34581"/>
+  <arg name="record_metrics" default="false"/>
+  <arg name="metrics_dir" default="~/.ros/uav_semantic_search_metrics"/>
+  <arg name="run_name" default="heterogeneous_fuel_stage4"/>
+
+  <rosparam command="load" file="$(find uav_semantic_search)/config/racer_stage3.yaml"/>
+  <rosparam command="load" file="$(find uav_semantic_search)/config/go2_nav.yaml"/>
+
+  <!-- Stage-2 perception and fixed-height UAV execution stack. It intentionally
+       does not launch the legacy autonomous_search_manager. -->
+  <include file="$(find uav_semantic_search)/launch/semantic_stage2.launch">
+    <arg name="autostart" value="$(arg autostart)"/>
+    <arg name="uav0_fcu_url" value="$(arg uav0_fcu_url)"/>
+    <arg name="uav1_fcu_url" value="$(arg uav1_fcu_url)"/>
+  </include>
+
+  <!-- The spawner waits for /gazebo/spawn_sdf_model, so Gazebo/PX4 may be started
+       in a separate terminal after this launch. -->
+  <node pkg="uav_semantic_search" type="go2_nav_spawner.py" name="go2_nav_spawner" output="screen"/>
+  <node pkg="uav_semantic_search" type="go2_pose_bridge.py" name="go2_pose_bridge" output="screen"/>
+  <group ns="ugv0">
+    <node pkg="uav_semantic_search" type="go2_kinematic_controller.py" name="go2_kinematic_controller" output="screen"/>
+    <node pkg="uav_semantic_search" type="ugv_waypoint_executor.py" name="ugv_waypoint_executor" output="screen">
+      <param name="robot" value="ugv0"/>
+    </node>
+
+    <!-- Reuse the same asynchronous RGB-D semantic detector as the UAVs. It
+         publishes /ugv0/semantic/target_observation and debug imagery. -->
+    <node pkg="uav_semantic_search" type="semantic_detector.py" name="semantic_detector" output="screen">
+      <param name="vehicle" value="ugv0"/>
+    </node>
+  </group>
+  <node pkg="uav_semantic_search" type="ground_map_fuser.py" name="ground_map_fuser" output="screen"/>
+
+  <!-- This is the sole high-level goal publisher for UAVs and Go2 in this launch. -->
+  <node pkg="uav_semantic_search" type="heterogeneous_fuel_manager.py" name="heterogeneous_fuel_manager" output="screen"/>
+
+  <node if="$(arg record_metrics)" pkg="uav_semantic_search" type="search_metrics_logger.py"
+        name="search_metrics_logger" output="screen">
+    <param name="output_dir" value="$(arg metrics_dir)"/>
+    <param name="run_name" value="$(arg run_name)"/>
+  </node>
+</launch>

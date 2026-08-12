@@ -1,0 +1,42 @@
+experiment:
+  map_id: h2
+  world_name: h2_industrial_ring_uav
+  uav_spawn_spec: "iris:1:0:2.0,iris:1:0:3.5"
+
+  ground_robot_spawns:
+    ugv0:
+      x: 1.2
+      y: 2.7
+      z: 0.34
+      yaw: 0.0
+
+# UAV占据地图
+map:
+  resolution: 0.20
+  width: 220
+  height: 180
+  origin_x: -22.0
+  origin_y: -2.0
+
+# UGV占据地图：必须与UAV地图保持一致
+ground_map:
+  resolution: 0.20
+  width: 220
+  height: 180
+  origin_x: -22.0
+  origin_y: -2.0
+
+racer_stage3:
+  max_assignment_path_m: 70.0
+  astar_max_expansions: 100000
+
+heterogeneous_fuel:
+  ground_exploration_boundary:
+    enabled: false
+  ugv_max_assignment_path_m: 70.0
+  ugv_astar_max_expansions: 100000
+
+vlm_semantic_search:
+  candidate_builder:
+    query_rescan_max_path_m: 70.0
+    hri_region_max_path_m: 70.0

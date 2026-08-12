@@ -1,0 +1,367 @@
+vlm_semantic_search:
+  # Master switches used by the paper ablations.  Topology labels are still
+  # computed when topology planning is disabled, but are hidden from the VLM
+  # and ignored by allocation so that raw RCR remains measurable.
+  ablation:
+    enable_topology_planning: true
+    enable_state_action_gate: true
+  frame_id: map
+  pause_gazebo_during_epoch: false
+  pause_service: /gazebo/pause_physics
+  unpause_service: /gazebo/unpause_physics
+  epoch_timeout_sec: 45.0
+  local_response_timeout_sec: 80.0
+  # Central VLM 的总等待时间必须覆盖：
+  # 3 次请求 + 两次退避等待 + validator 等待时间。
+  central_response_timeout_sec: 195.0
+  validator_timeout_sec: 6.0
+  central_retry:
+    enabled: true
+    # 初始请求之外，额外再重试两次。
+    max_retries: 2
+    # 每一次 Central VLM API 请求的最长等待时间。
+    attempt_timeout_sec: 60.0
+    # 三次请求和退避等待的总时间上限。
+    total_deadline_sec: 190.0
+    # 第一次失败后等待 1 秒；第二次失败后等待 2 秒。
+    initial_backoff_sec: 1.0
+    backoff_multiplier: 2.0
+  validator_timeout_sec: 6.0
+  resume_on_failure: true
+  target_query:
+    query_id: Q0
+    query_text: >
+      搜索与目标颜色和外观描述相匹配的物体。
+      当前目标特征为：明显红色；形状可能为圆柱体、箱体、低矮物体或其他物体。
+      不要求它属于特定语义类别。只要其颜色或外观与目标描述相符，
+      就应作为疑似目标返回，并提供紧致边界框。
+    query_type: generic_colored_object
+    target_attributes:
+      colors: [red]
+      shapes: [cylinder, box, irregular, unknown]
+      semantic_class_required: false
+    ground_verification_required: true
+    priority: high
+  backend:
+    mode: openai_compatible
+    base_url: 
+    api_key: 
+    api_key_env: VLM_API_KEY
+    model: 
+    timeout_sec: 45.0
+    temperature: 0.0
+    max_tokens: 1400
+    allow_mock_fallback: false
+  scheduler:
+    tick_hz: 2.0
+    min_trigger_interval_sec: 20.0
+    initial_trigger_after_uav_takeoff: true
+    require_all_uav_takeoff_ready: true
+    min_known_cells_uav: 20
+    min_known_cells_ugv: 20
+    require_all_local_vlm_ready: true
+    goal_completion_trigger_task_types:
+    - EXPLORE
+    - INSPECT
+    - GROUND_VERIFY
+    - AERIAL_INSPECT
+    - HRI_REGION_SEARCH
+    - QUERY_RESCAN
+    uav_distance_trigger_m: 1.2
+    ugv_distance_trigger_m: 0.5
+    uav_yaw_trigger_deg: 45.0
+    ugv_yaw_trigger_deg: 35.0
+    map_new_free_cells_trigger: 28
+    local_free_sector_radius_m: 1.2
+    branch_sector_count_trigger: 2
+    topology_signature_change_trigger: true
+    semantic_coverage_gain_trigger: 0.32
+    coverage_depth_stride_px: 32
+    max_coverage_cells_per_observation: 280
+    visual_novelty_hist_trigger: 0.18
+    enable_query_relevance_gate: false
+    query_relevance_trigger: 0.4
+    trigger_on_goal_reached: true
+    trigger_on_robot_blocked: true
+    trigger_on_target_query_change: true
+    backend_failure_cooldown_sec: 60.0
+    trigger_on_distance_in_uncertain_space: false
+    trigger_on_new_observation_sector: false
+    trigger_on_visual_novelty: true
+
+    # 新增：轻量颜色候选检测。
+    # 它只决定是否触发 Local VLM，不直接认定为任务目标。
+    trigger_on_color_candidate: true
+    color_candidate_trigger:
+      enabled: true
+      # 新增：颜色触发器跟随当前目标描述。
+      # 例如目标为 blue 时，只检测 blue profile。
+      follow_target_query_colors: true
+      # HSV 检测频率，不会调用 VLM。
+      detect_rate_hz: 5.0
+      # 连续检测到红色区域多少帧才认为稳定。
+      confirm_frames: 2
+      # 连续多少帧未检测到颜色区域，才认为当前画面中的颜色候选消失。
+      clear_frames: 3
+      # COLOR_CANDIDATE_RED 不受普通 20 s trigger 间隔限制。
+      bypass_min_trigger_interval: true
+      # 检测到稳定颜色候选后，立即冻结 RGB-D/位姿。
+      snapshot_transport_wait_sec: 1.0
+      # Local VLM 节点缓存多少个冻结的颜色候选快照。
+      snapshot_cache_size: 8
+      # 发现稳定颜色候选后，立即让对应机器人停车/悬停。
+      hold_on_stable_candidate: true
+      # 防止云端异常导致机器人无限停车。
+      # 当前 Local VLM 可能经历 3 次请求和重试，300 s 更稳妥。
+      hold_max_sec: 300.0
+      # Color epoch 得到规划结果后，等待路径消息下发的保护时间。
+      # 你日志中 A* route 通常几十毫秒就生成，1.0 s 足够。
+      release_delay_sec: 1.0
+      publish_debug_image: true
+      profiles:
+        red:
+          enabled: true
+          min_area_px: 180
+          morphology_kernel_px: 5
+          # OpenCV HSV: H ∈ [0, 179]
+          hsv_ranges:
+            - lower: [0, 100, 70]
+              upper: [10, 255, 255]
+            - lower: [170, 100, 70]
+              upper: [179, 255, 255]
+        blue:
+          enabled: true
+          min_area_px: 180
+          morphology_kernel_px: 5
+          hsv_ranges:
+            - lower: [90, 60, 40]
+              upper: [135, 255, 255]
+    # 新增：Coordinator 的事件队列配置。
+    event_queue:
+      enabled: true
+      max_pending_events: 12
+
+    trigger_on_map_free_space_expanded: false
+    trigger_on_topology_cue_changed: false
+  local_perception:
+    jpeg_quality: 85
+    min_laplacian_variance: 8.0
+    depth_patch_radius_px: 4
+    min_depth_m: 0.3
+    max_depth_m: 8.0
+    coverage_depth_stride_px: 32
+    max_coverage_cells: 280
+    publish_debug_image: true
+  semantic_overlay:
+    association_radius_m: 1.25
+    max_objects: 300
+    publish_rate_hz: 2.0
+    marker_lifetime_sec: 0.0
+    # 新增：保存历史语义观测点，用于目标描述切换后的重访搜索。
+    max_observation_history: 300
+    max_observation_history_in_summary: 120
+    # 目标切换后用于生成 QUERY_RESCAN_COVERAGE 的语义覆盖栅格摘要上限。
+    max_semantic_coverage_cells_in_summary: 800
+  candidate_builder:
+    # 每台机器人最终送入 Central VLM 的候选总数。
+    max_candidates_per_robot: 12
+    max_total_candidates: 36
+
+    # Frontier topology regions. Candidates attached to the same free-space
+    # skeleton branch share one topology_region_id.
+    enable_topology_frontier_regions: true
+    topology_min_free_component_area_m2: 0.8
+    topology_spur_prune_length_m: 0.6
+    topology_min_branch_length_m: 0.4
+    topology_thinning_max_iterations: 500
+    topology_frontier_association_max_distance_m: 4.0
+    topology_high_confidence_distance_m: 1.5
+
+    # Preserve region diversity before the bounded catalog is sent to the VLM.
+    enable_topology_diverse_prefilter: true
+    max_frontiers_per_topology_region_per_robot: 2
+
+    # 新增：目标描述切换后的已探索区域重访候选。
+    enable_query_rescan_candidates: true
+    query_rescan_event_reasons:
+      - TARGET_QUERY_CHANGE
+    max_query_rescan_candidates_per_robot: 4
+    query_rescan_min_spacing_m: 2.0
+    query_rescan_max_path_m: 35.0
+    query_rescan_base_score: 30.0
+    query_rescan_path_cost_weight: 0.6
+    # 增强 QUERY_RESCAN：从旧 query 的覆盖区域、语义锚点和已探索自由空间生成重扫点。
+    max_query_coverage_rescan_candidates_per_robot: 3
+    max_query_rescan_total_candidates_per_robot: 6
+    query_coverage_rescan_min_spacing_m: 2.0
+    query_semantic_anchor_rescan_bonus: 12.0
+    query_coverage_rescan_bonus: 8.0
+    enable_query_free_space_rescan_candidates: true
+    query_free_space_rescan_sample_step_m: 3.0
+    query_free_space_rescan_min_displacement_m: 1.5
+    query_free_space_rescan_bonus: 4.0
+
+    # 人类优先区域主动生成搜索候选点。
+    # 作用：即使框选区域内没有 frontier 或已识别目标，也能生成安全可达搜索点。
+    enable_hri_region_search_candidates: true
+
+    # 在人类区域内采样候选点的间距，越小越精细，但计算量越大。
+    hri_region_sample_step_m: 0.6
+
+    # 每个区域、每台机器人最多保留几个 HRI 区域候选点。
+    max_hri_region_candidates_per_region_per_robot: 2
+
+    # HRI 候选点之间的最小间距，避免同一区域生成过密目标点。
+    hri_region_candidate_min_spacing_m: 1.2
+
+    # HRI 区域候选最大路径长度。
+    hri_region_max_path_m: 35.0
+
+    # HRI 区域候选基础分数。建议高于普通 frontier。
+    hri_region_base_score: 80.0
+
+    # 人类区域 priority 对候选分数的影响。
+    hri_region_priority_weight: 40.0
+
+    # 路径长度惩罚。
+    hri_region_path_cost_weight: 0.8
+
+    # Tier 0：疑似目标候选。
+    max_target_candidates_per_robot: 2
+    target_candidate_min_confidence: 0.45
+    # target_confidence 达到该值时，UGV 任务类型使用 GROUND_VERIFY。
+    ground_verify_min_confidence: 0.75
+    # Tier 1：探索候选。即使有普通障碍物，也优先保留这些 frontier。
+    max_frontier_candidates_per_robot: 12
+    # Tier 2：普通语义对象检查。它们只会排在 target/frontier 后面。
+    # 普通语义物体 INSPECT 容易打断搜索；默认关闭。
+    # 疑似目标候选仍会通过 include_semantic_inspection 生成，
+    # 并被标记为 AERIAL_INSPECT / GROUND_VERIFY。
+    max_generic_inspection_candidates_per_robot: 0
+    max_inspection_objects: 16
+
+    include_semantic_inspection: true
+    include_generic_semantic_inspection: false
+    include_scan_in_place: true
+
+    semantic_priority_target_confidence: 0.75
+    uav_height_from_config: true
+    uav_inspection_height_offset_m: 0.35
+    ugv_inspection_offset_m: 0.7
+
+    # ------------------------------------------------------------
+    # Query-switch rescan enhancement
+    # ------------------------------------------------------------
+    enable_query_coverage_rescan_candidates: true
+    enable_query_free_space_rescan_candidates: true
+
+    # 目标切换后最多保留多少个 QUERY_RESCAN 候选。
+    max_query_rescan_total_candidates_per_robot: 6
+
+    # 旧 query 语义覆盖区域重扫候选数量。
+    max_query_coverage_rescan_candidates_per_robot: 3
+
+    # 已探索自由空间补扫候选数量。
+    max_query_free_space_rescan_candidates_per_robot: 2
+
+    # 重扫点之间的最小间距，避免候选点堆在一起。
+    query_rescan_min_spacing_m: 2.0
+
+    # 重扫最大路径长度。
+    query_rescan_max_path_m: 35.0
+
+    # 当存在有效 frontier 时，是否让 frontier 优先于 coverage/free-space rescan。
+    query_rescan_prefer_frontiers_when_available: true
+
+    # 判断是否存在有效 frontier 的阈值。
+    # query_rescan_frontier_min_count: 1
+    # query_rescan_frontier_utility_threshold: 5.0
+    # frontier_candidates 已经过安全性与 A* 可达性过滤。
+    # 是否存在 frontier 由候选数量直接判断；utility 只用于候选排序。
+
+    # free-space 点是否只在没有有效 frontier 时生成。
+    query_free_space_only_when_no_effective_frontier: true
+
+    # free-space 采样间隔。
+    query_free_space_rescan_sample_step_m: 3.0
+
+    # 距离机器人太近的 free-space 点不生成，避免小幅移动。
+    query_free_space_rescan_min_displacement_m: 1.5
+
+    # 不同 rescan 类型的基础分数。
+    # 有 frontier 时 coverage 分数较低，避免压过 frontier；
+    # 没有 frontier 时 coverage/free-space 分数提高，避免机器人无任务。
+    query_coverage_rescan_base_score_with_frontier: 12.0
+    query_coverage_rescan_base_score_no_frontier: 32.0
+    query_free_space_rescan_base_score_no_frontier: 24.0
+
+    query_rescan_path_cost_weight: 0.6
+
+    query_semantic_anchor_rescan_bonus_with_frontier: -4.0
+    query_semantic_anchor_rescan_bonus_no_frontier: 12.0
+
+    query_coverage_rescan_bonus_with_frontier: -8.0
+    query_coverage_rescan_bonus_no_frontier: 8.0
+
+    query_free_space_rescan_bonus_no_frontier: 4.0
+
+    # 当前 query 下目标确认后，不再继续分配探索/重扫任务。
+    stop_assignment_after_confirmed_target: true
+
+    # 没有显式 CONFIRMED 状态时，用置信度作为目标已确认的兜底判断。
+    confirmed_target_completion_confidence: 0.80
+
+  central_planner:
+    # Central VLM 每次都面向全体机器人进行联合重分配。
+    plan_valid_for_sec: 14.0
+    planning_scope: all_robots
+    require_joint_assignment: true
+  validator:
+    enforce_task_priority: true  # 禁止普通 INSPECT 在仍有疑似目标或 EXPLORE frontier 时抢占任务。
+    enforce_hri_region_priority: true  # 有人类优先区域候选时，禁止普通 frontier/INSPECT 抢占。
+    recheck_astar: true
+    reject_duplicate_candidate_assignment: true
+    # Distinct candidate IDs may still belong to the same skeleton branch.
+    # Reject that duplication when another safe topology region is reachable.
+    enforce_topology_region_diversity: true
+    topology_region_default_capacity: 1
+    topology_allow_shared_region_if_no_alternative: true
+    topology_shared_region_min_goal_separation_m: 2.2
+    fallback_mode: safe_nearest_candidate  # Central VLM 漏掉某台机器人时，自动给该机器人补一个安全候选点。
+    assign_unassigned_robots: true
+    force_joint_assignment: true  # 即使 Central VLM 超时、进入 MAP_FALLBACK，也对三台机器人统一重新分配。
+
+    require_initial_uav_explore: true
+    # 目标描述切换后禁止旧 query 的目标核验任务继续通过 validator。
+    reject_stale_target_verification: true
+
+  skip_central_on_local_timeout: true
+  skip_central_on_local_failure: true
+  local_dispatch:
+    mode: sequential
+    participant_order:
+    - uav0
+    - uav1
+    - ugv0
+    per_robot_response_timeout_sec: 195.0
+    inter_request_delay_sec: 0.3
+  local_retry:
+    enabled: true
+    max_retries: 2
+    attempt_timeout_sec: 60.0
+    total_deadline_sec: 190.0
+    initial_backoff_sec: 1.5
+    backoff_multiplier: 2.0
+    retry_on_timeout: true
+    retry_on_connection_errors: true
+    retry_on_http_429_5xx: true
+    snapshot_policy: identical_epoch_snapshot
+  backend_fallback:
+    enabled: true
+    response_timeout_sec: 12.0
+    minimum_goal_displacement_m: 1.0
+  route_planner:
+    request_topic: /vlm/route_request
+    result_topic: /vlm/route_result
+    recompute_from_current_pose: true
+    recompute_from_current_map: true

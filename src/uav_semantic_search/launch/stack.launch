@@ -1,0 +1,53 @@
+<launch>
+  <arg name="autostart" default="true"/>
+  <arg name="start_demo" default="false"/>
+  <!-- Derived from this user's PX4_Firmware_13 px4-rc.mavlink:
+       instance 0: PX4 listen 34580, MAVROS bind 24540
+       instance 1: PX4 listen 34581, MAVROS bind 24541 -->
+  <arg name="uav0_fcu_url" default="udp://:24540@127.0.0.1:34580"/>
+  <arg name="uav1_fcu_url" default="udp://:24541@127.0.0.1:34581"/>
+
+  <param name="use_sim_time" value="true"/>
+  <rosparam command="load" file="$(find uav_semantic_search)/config/system.yaml"/>
+  <rosparam command="load" file="$(find uav_semantic_search)/config/experiment_runtime.yaml"/>
+
+  <!-- 必须在system.yaml之后、central_map_fuser启动之前加载 -->
+  <rosparam command="load" file="$(arg experiment_config)"/>
+
+  <group ns="uav0">
+    <include file="$(find mavros)/launch/px4.launch">
+      <arg name="fcu_url" value="$(arg uav0_fcu_url)"/>
+      <arg name="gcs_url" value=""/>
+      <arg name="tgt_system" value="1"/>
+      <arg name="tgt_component" value="1"/>
+    </include>
+  </group>
+  <group ns="uav1">
+    <include file="$(find mavros)/launch/px4.launch">
+      <arg name="fcu_url" value="$(arg uav1_fcu_url)"/>
+      <arg name="gcs_url" value=""/>
+      <arg name="tgt_system" value="2"/>
+      <arg name="tgt_component" value="1"/>
+    </include>
+  </group>
+
+  <node pkg="uav_semantic_search" type="gazebo_pose_bridge.py" name="gazebo_pose_bridge" output="screen"/>
+  <node pkg="uav_semantic_search" type="central_map_fuser.py" name="central_map_fuser" output="screen"/>
+
+  <group ns="uav0">
+    <node pkg="uav_semantic_search" type="waypoint_executor.py" name="waypoint_executor" output="screen">
+      <param name="vehicle" value="uav0"/>
+      <param name="autostart" value="$(arg autostart)"/>
+    </node>
+  </group>
+  <group ns="uav1">
+    <node pkg="uav_semantic_search" type="waypoint_executor.py" name="waypoint_executor" output="screen">
+      <param name="vehicle" value="uav1"/>
+      <param name="autostart" value="$(arg autostart)"/>
+    </node>
+  </group>
+
+  <node if="$(arg start_demo)" pkg="uav_semantic_search" type="corridor_demo_mission.py" name="corridor_demo_mission" output="screen"/>
+
+  <arg name="experiment_config" default="$(find uav_semantic_search)/config/experiments/h1.yaml"/>
+</launch>

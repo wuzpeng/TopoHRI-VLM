@@ -1,0 +1,24 @@
+<launch>
+  <arg name="autostart" default="true"/>
+  <arg name="uav0_fcu_url" default="udp://:24540@127.0.0.1:34580"/>
+  <arg name="uav1_fcu_url" default="udp://:24541@127.0.0.1:34581"/>
+
+  <include file="$(find uav_semantic_search)/launch/stack.launch">
+    <arg name="autostart" value="$(arg autostart)"/>
+    <arg name="start_demo" value="false"/>
+    <arg name="uav0_fcu_url" value="$(arg uav0_fcu_url)"/>
+    <arg name="uav1_fcu_url" value="$(arg uav1_fcu_url)"/>
+  </include>
+
+  <group ns="uav0">
+    <node pkg="uav_semantic_search" type="semantic_detector.py" name="semantic_detector" output="screen">
+      <param name="vehicle" value="uav0"/>
+    </node>
+  </group>
+  <group ns="uav1">
+    <node pkg="uav_semantic_search" type="semantic_detector.py" name="semantic_detector" output="screen">
+      <param name="vehicle" value="uav1"/>
+    </node>
+  </group>
+  <node pkg="uav_semantic_search" type="target_fusion_node.py" name="target_fusion_node" output="screen"/>
+</launch>

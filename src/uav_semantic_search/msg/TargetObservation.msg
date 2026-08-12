@@ -1,0 +1,12 @@
+std_msgs/Header header
+string robot_id
+string class_name
+float32 confidence
+geometry_msgs/PoseWithCovariance pose
+float32 depth_m
+uint32 pixel_u
+uint32 pixel_v
+float32 bbox_xmin
+float32 bbox_ymin
+float32 bbox_xmax
+float32 bbox_ymax

@@ -1,0 +1,24 @@
+# Stage-5 v0.5.5 cloud-safe VLM runtime settings.
+# Apply with scripts/upgrade_stage5_v055_cloud_safe_config.py instead of copying
+# this file over vlm_semantic_search.yaml, because the current YAML may contain
+# your direct API key.
+vlm_semantic_search:
+  pause_gazebo_during_epoch: false
+  local_response_timeout_sec: 22.0
+  central_response_timeout_sec: 22.0
+  validator_timeout_sec: 6.0
+  skip_central_on_local_timeout: true
+  skip_central_on_local_failure: true
+  scheduler:
+    min_trigger_interval_sec: 20.0
+    backend_failure_cooldown_sec: 60.0
+    trigger_on_goal_reached: true
+    trigger_on_robot_blocked: true
+    trigger_on_target_query_change: true
+    trigger_on_distance_in_uncertain_space: false
+    trigger_on_new_observation_sector: false
+    trigger_on_visual_novelty: false
+    trigger_on_map_free_space_expanded: false
+    trigger_on_topology_cue_changed: false
+  validator:
+    fallback_mode: hold

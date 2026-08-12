@@ -1,0 +1,786 @@
+<?xml version='1.0' encoding='utf-8'?>
+<sdf version="1.6">
+  <world name="corridor_rooms">
+    <gravity>0 0 -9.81</gravity>
+    <physics type="ode">
+      <max_step_size>.004</max_step_size>
+      <real_time_factor>1.0</real_time_factor>
+      <real_time_update_rate>250</real_time_update_rate>
+    </physics>
+    <scene>
+      <ambient>.45 .45 .45 1</ambient>
+      <background>.70 .78 .88 1</background>
+      <shadows>true</shadows>
+    </scene>
+    <include>
+      <uri>model://sun</uri>
+    </include>
+    <include>
+      <uri>model://ground_plane</uri>
+    </include>
+    <model name="north_entry">
+      <static>true</static>
+      <pose>-2.5 2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.82 0.82 0.82 1</ambient>
+            <diffuse>0.82 0.82 0.82 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="south_entry">
+      <static>true</static>
+      <pose>-2.5 -2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.82 0.82 0.82 1</ambient>
+            <diffuse>0.82 0.82 0.82 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="north_wall_0">
+      <static>true</static>
+      <pose>1.875 2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>3.75 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>3.75 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_wall_1">
+      <static>true</static>
+      <pose>10.0 2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>7.5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>7.5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_wall_2">
+      <static>true</static>
+      <pose>20.0 2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>7.5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>7.5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_wall_3">
+      <static>true</static>
+      <pose>30.625 2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>8.75 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>8.75 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_wall_0">
+      <static>true</static>
+      <pose>1.875 -2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>3.75 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>3.75 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_wall_1">
+      <static>true</static>
+      <pose>10.0 -2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>7.5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>7.5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_wall_2">
+      <static>true</static>
+      <pose>20.0 -2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>7.5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>7.5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_wall_3">
+      <static>true</static>
+      <pose>30.625 -2 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>8.75 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>8.75 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room0_outer">
+      <static>true</static>
+      <pose>5 7 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room0_left">
+      <static>true</static>
+      <pose>2.5 4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room0_right">
+      <static>true</static>
+      <pose>7.5 4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room1_outer">
+      <static>true</static>
+      <pose>15 7 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room1_left">
+      <static>true</static>
+      <pose>12.5 4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room1_right">
+      <static>true</static>
+      <pose>17.5 4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room2_outer">
+      <static>true</static>
+      <pose>25 7 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room2_left">
+      <static>true</static>
+      <pose>22.5 4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="north_room2_right">
+      <static>true</static>
+      <pose>27.5 4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room0_outer">
+      <static>true</static>
+      <pose>5 -7 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room0_left">
+      <static>true</static>
+      <pose>2.5 -4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room0_right">
+      <static>true</static>
+      <pose>7.5 -4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room1_outer">
+      <static>true</static>
+      <pose>15 -7 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room1_left">
+      <static>true</static>
+      <pose>12.5 -4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room1_right">
+      <static>true</static>
+      <pose>17.5 -4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room2_outer">
+      <static>true</static>
+      <pose>25 -7 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>5 0.18 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room2_left">
+      <static>true</static>
+      <pose>22.5 -4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="south_room2_right">
+      <static>true</static>
+      <pose>27.5 -4.5 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 5 3.2</size>
+            </box>
+          </geometry>
+        </visual>
+      </link>
+    </model>
+    <model name="table_north_2">
+      <static>true</static>
+      <pose>15 5 0.55 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>1.5 1.0 1.1</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>1.5 1.0 1.1</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.35 0.20 0.10 1</ambient>
+            <diffuse>0.35 0.20 0.10 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="cabinet_south_1">
+      <static>true</static>
+      <pose>5 -5.2 0.75 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.8 1.0 1.5</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.8 1.0 1.5</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.25 0.25 0.25 1</ambient>
+            <diffuse>0.25 0.25 0.25 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="debris_south_3">
+      <static>true</static>
+      <pose>24 -4.2 0.35 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>1.2 0.7 0.7</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>1.2 0.7 0.7</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.45 0.35 0.20 1</ambient>
+            <diffuse>0.45 0.35 0.20 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="victim_surrogate">
+      <static>true</static>
+      <pose>26 5.7 .35 0 1.5708 0</pose>
+      <link name="body">
+        <collision name="c">
+          <geometry>
+            <cylinder>
+              <radius>.22</radius>
+              <length>1.35</length>
+            </cylinder>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <cylinder>
+              <radius>.22</radius>
+              <length>1.35</length>
+            </cylinder>
+          </geometry>
+          <material>
+            <ambient>.85 .05 .03 1</ambient>
+            <diffuse>.85 .05 .03 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="victim_head">
+      <static>true</static>
+      <pose>26 6.38 .35 0 0 0</pose>
+      <link name="h">
+        <collision name="c">
+          <geometry>
+            <sphere>
+              <radius>.20</radius>
+            </sphere>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <sphere>
+              <radius>.20</radius>
+            </sphere>
+          </geometry>
+          <material>
+            <ambient>.95 .65 .45 1</ambient>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="west_corridor_end_wall">
+      <static>true</static>
+      <pose>-5.0 0 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 4.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 4.18 3.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.82 0.82 0.82 1</ambient>
+            <diffuse>0.82 0.82 0.82 1</diffuse>
+          </material>
+        </visual>
+      </link>
+    </model>
+    <model name="east_corridor_end_wall">
+      <static>true</static>
+      <pose>35.0 0 1.6 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.18 4.18 3.2</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.18 4.18 3.2</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.82 0.82 0.82 1</ambient>
+            <diffuse>0.82 0.82 0.82 1</diffuse>
+          </material>
+        </visual>
+      </link>
+      
+    </model>
+        <model name="blue_target_box">
+      <static>true</static>
+      <pose>15 -5.6 0.35 0 0 0</pose>
+      <link name="l">
+        <collision name="c">
+          <geometry>
+            <box>
+              <size>0.8 0.8 0.7</size>
+            </box>
+          </geometry>
+        </collision>
+        <visual name="v">
+          <geometry>
+            <box>
+              <size>0.8 0.8 0.7</size>
+            </box>
+          </geometry>
+          <material>
+            <ambient>0.02 0.12 0.95 1</ambient>
+            <diffuse>0.02 0.12 0.95 1</diffuse>
+            <specular>0.05 0.05 0.20 1</specular>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

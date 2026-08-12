@@ -1,0 +1,859 @@
+#!/usr/bin/env python3
+"""Lightweight trigger scheduler for local VLM perception.
+
+No large VLM is invoked here.  The node continuously receives maps, poses and
+images, and emits a single structured trigger when geometry, visual novelty,
+semantic-coverage gain, query changes, mission completion or safety events
+make a synchronous semantic decision epoch worthwhile.
+"""
+from __future__ import annotations
+
+import math
+import os
+import sys
+import threading
+import uuid
+from typing import Any, Dict, Optional
+
+import cv2
+import numpy as np
+import rospy
+from cv_bridge import CvBridge
+from geometry_msgs.msg import PoseStamped
+from nav_msgs.msg import OccupancyGrid
+from sensor_msgs.msg import CameraInfo, Image
+from std_msgs.msg import Bool, String
+
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPT_DIR)
+
+from vlm_common import (compact_json, grid_from_msg, histogram_novelty,
+                        normalized_hsv_histogram, now_wall, pose_to_dict,
+                        sampled_depth_coverage_cells, safe_json_loads, yaw_from_pose)
+
+
+class TriggerScheduler:
+    def __init__(self):
+        root = rospy.get_param('/vlm_semantic_search')
+        self.root = root
+        self.cfg = root['scheduler']
+        self.local_cfg = root['local_perception']
+        # 新增：HSV 颜色候选检测配置。
+        self.color_cfg = dict(
+            self.cfg.get('color_candidate_trigger', {}))
+        self.lock = threading.RLock()
+        self.bridge = CvBridge()
+        self.robots = list(rospy.get_param('/vehicles', [])) + list(rospy.get_param('/ground_robots', []))
+        self.robot_by_name = {item['name']: item for item in self.robots if item.get('name')}
+        self.states: Dict[str, Dict[str, Any]] = {}
+        self.maps: Dict[str, Optional[OccupancyGrid]] = {'uav': None, 'ugv': None}
+        self.epoch_active = False
+        self.query = dict(root.get('target_query', {}))
+        self.query_version = 0
+        # /vlm/target_query is latched.  The first callback only establishes
+        # the initial query and must never create a pre-readiness epoch.
+        self.initial_query_received = False
+        self.pending_query_change = False
+        self.initial_fired = False
+        self.last_trigger_wall = 0.0
+
+        self.trigger_pub = rospy.Publisher(
+            '/vlm/trigger_event',
+            String,
+            queue_size=5,
+        )
+
+        self.status_pub = rospy.Publisher(
+            '/vlm/trigger_status',
+            String,
+            queue_size=5,
+            latch=True,
+        )
+
+        # 新增：发布稳定颜色候选信息，便于调试。
+        self.color_candidate_pub = rospy.Publisher(
+            '/vlm/color_candidate',
+            String,
+            queue_size=10,
+        )
+
+        # 每台机器人各自发布一个带颜色候选框的调试图像。
+        self.color_debug_pubs = {}
+
+        for robot in self.robots:
+            name = robot['name']
+            if bool(self.color_cfg.get('publish_debug_image', True)):
+                self.color_debug_pubs[name] = rospy.Publisher(
+                    '/%s/vlm/color_candidate_debug_image' % name,
+                    Image,
+                    queue_size=1,
+                )
+
+            self.states[name] = {
+                'pose': None, 'image': None, 'depth': None, 'camera_info': None,
+                'last_sem_pose': None, 'last_sem_yaw': None, 'last_sem_hist': None,
+                'last_sem_coverage': set(), 'last_free_count': 0,
+                # `goal_reached` is a one-shot pending event. `reached_level` stores
+                # the raw Bool level from the executor so repeated latched True
+                # messages cannot retrigger a new VLM epoch.
+                'goal_reached': False, 'reached_level': False,
+                # Completion is armed exclusively by the validated goal-dispatch
+                # event.  Raw /mission/reached False messages from the executor do
+                # NOT rearm it; otherwise a repeated same-goal dispatch creates an
+                # infinite reached -> plan -> reached loop.
+                'completion_armed': False, 'completion_pending_dispatch': None,
+                'last_dispatch_signature': None, 'last_completed_dispatch': None,
+                'last_dispatch_task_type': '', 'local_vlm_ready': False,
+                'blocked': False,
+                'topology_signature': None,
+                'cooldown_until': 0.0,
+                # 新增：颜色候选检测状态。
+                'color_candidate': None,
+                'color_hits': 0,
+                'color_clears': 0,
+                'color_trigger_pending': False,
+                'color_trigger_consumed': False,
+                'color_candidate_reported': False,
+                'last_color_detection_wall': 0.0,
+
+                'blocked_event_pending': False,
+                'blocked_event_consumed': False,
+            }
+            rospy.Subscriber(robot['global_pose_topic'], PoseStamped,
+                             lambda msg, n=name: self._pose_cb(n, msg), queue_size=20)
+            rospy.Subscriber(robot['rgb_topic'], Image,
+                             lambda msg, n=name: self._rgb_cb(n, msg), queue_size=1, buff_size=2**24)
+            rospy.Subscriber(robot['depth_topic'], Image,
+                             lambda msg, n=name: self._depth_cb(n, msg), queue_size=1, buff_size=2**24)
+            rospy.Subscriber(robot['camera_info_topic'], CameraInfo,
+                             lambda msg, n=name: self._info_cb(n, msg), queue_size=2, buff_size=2**20)
+            # Stage-4 UAV configs historically did not declare this key explicitly.
+            # Keep the Stage-5 scheduler backward-compatible while using the standard
+            # per-robot mission completion topic.
+            reached_topic = str(robot.get('mission_reached_topic', '/%s/mission/reached' % name))
+            rospy.Subscriber(reached_topic, Bool,
+                             lambda msg, n=name: self._reached_cb(n, msg), queue_size=5)
+            if robot.get('blocked_topic'):
+                rospy.Subscriber(robot['blocked_topic'], Bool,
+                                 lambda msg, n=name: self._blocked_cb(n, msg), queue_size=5)
+            # Startup barrier: do not emit INITIAL_CONTEXT_READY until every
+            # local VLM node has created its request subscriber.
+            rospy.Subscriber('/%s/vlm/ready' % name, Bool,
+                             lambda msg, n=name: self._local_ready_cb(n, msg), queue_size=2)
+
+        rospy.Subscriber('/global_map_2d', OccupancyGrid, lambda msg: self._map_cb('uav', msg), queue_size=2)
+        rospy.Subscriber('/ugv0/ground_map_2d', OccupancyGrid, lambda msg: self._map_cb('ugv', msg), queue_size=2)
+        rospy.Subscriber('/vlm/epoch_active', Bool, self._epoch_cb, queue_size=5)
+        rospy.Subscriber('/vlm/target_query', String, self._query_cb, queue_size=5)
+        rospy.Subscriber('/vlm/local_semantic_observation', String, self._semantic_cb, queue_size=20)
+        # Goal dispatch metadata is the authoritative re-arm signal for
+        # GOAL_REACHED. It carries candidate/task semantics that raw executor
+        # Bool topics do not provide.
+        rospy.Subscriber('/vlm/goal_dispatch', String, self._goal_dispatch_cb, queue_size=20)
+        for robot in self.robots:
+            if robot.get('type') == 'uav':
+                rospy.Subscriber('/%s/mission/takeoff_ready' % robot['name'], Bool,
+                                 lambda msg, n=robot['name']: self._takeoff_cb(n, msg), queue_size=2)
+                self.states[robot['name']]['takeoff_ready'] = False
+
+        rate = max(0.2, float(self.cfg.get('tick_hz', 2.0)))
+        rospy.Timer(rospy.Duration(1.0 / rate), self._tick)
+        self.status_pub.publish('WAITING_FOR_SENSOR_CONTEXT')
+
+    def _pose_cb(self, name, msg):
+        with self.lock:
+            self.states[name]['pose'] = msg
+
+    def _rgb_cb(self, name, msg):
+        try:
+            image = self.bridge.imgmsg_to_cv2(
+                msg,
+                desired_encoding='bgr8'
+            )
+        except Exception:
+            return
+
+        image = np.array(image, copy=True)
+
+        with self.lock:
+            self.states[name]['image'] = image
+
+        # 新增：每帧 RGB 图像到达时，用轻量 HSV 检测更新颜色候选状态。
+        # 不调用 VLM；这里只做低成本颜色筛选。
+        if bool(self.color_cfg.get('enabled', False)):
+            self._update_color_candidate(name, image)
+
+    def _detect_color_candidate(self, bgr):
+        """Detect the largest configured color region.
+
+        This is only a trigger proposal. It does not determine whether the object
+        is the requested target. Local VLM performs the semantic confirmation.
+        """
+        profiles = self.color_cfg.get('profiles', {})
+
+        if not isinstance(profiles, dict) or not profiles:
+            return None
+
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        image_area = float(max(1, bgr.shape[0] * bgr.shape[1]))
+
+        best = None
+
+        for color_name, profile in profiles.items():
+            if not isinstance(profile, dict):
+                continue
+
+            if not bool(profile.get('enabled', True)):
+                continue
+
+            ranges = profile.get('hsv_ranges', [])
+            if not isinstance(ranges, list) or not ranges:
+                continue
+
+            mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+
+            for hsv_range in ranges:
+                if not isinstance(hsv_range, dict):
+                    continue
+
+                lower = np.asarray(
+                    hsv_range.get('lower', [0, 0, 0]),
+                    dtype=np.uint8,
+                )
+
+                upper = np.asarray(
+                    hsv_range.get('upper', [179, 255, 255]),
+                    dtype=np.uint8,
+                )
+
+                mask = cv2.bitwise_or(
+                    mask,
+                    cv2.inRange(hsv, lower, upper),
+                )
+
+            kernel_size = max(
+                1,
+                int(profile.get('morphology_kernel_px', 5)),
+            )
+
+            if kernel_size % 2 == 0:
+                kernel_size += 1
+
+            kernel = np.ones(
+                (kernel_size, kernel_size),
+                dtype=np.uint8,
+            )
+
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_OPEN,
+                kernel,
+            )
+
+            mask = cv2.morphologyEx(
+                mask,
+                cv2.MORPH_CLOSE,
+                kernel,
+            )
+
+            contour_result = cv2.findContours(
+                mask,
+                cv2.RETR_EXTERNAL,
+                cv2.CHAIN_APPROX_SIMPLE,
+            )
+
+            if len(contour_result) == 2:
+                contours, _ = contour_result
+            else:
+                _, contours, _ = contour_result
+
+            if not contours:
+                continue
+
+            contour = max(contours, key=cv2.contourArea)
+            area = float(cv2.contourArea(contour))
+
+            if area < float(profile.get('min_area_px', 180)):
+                continue
+
+            x, y, w, h = cv2.boundingRect(contour)
+
+            moments = cv2.moments(contour)
+
+            if abs(moments['m00']) < 1e-6:
+                u = x + w // 2
+                v = y + h // 2
+            else:
+                u = int(moments['m10'] / moments['m00'])
+                v = int(moments['m01'] / moments['m00'])
+
+            candidate = {
+                'color': str(color_name),
+                'bbox': [int(x), int(y), int(x + w), int(y + h)],
+                'center_px': [int(u), int(v)],
+                'area_px': round(area, 1),
+                'confidence': round(
+                    min(0.99, area / max(1.0, 0.02 * image_area)),
+                    3,
+                ),
+            }
+
+            if best is None or candidate['area_px'] > best['area_px']:
+                best = candidate
+
+        return best
+
+
+    def _publish_color_debug(self, name, bgr, candidate):
+        """Publish a debug image with the HSV candidate box."""
+
+        pub = self.color_debug_pubs.get(name)
+
+        if pub is None:
+            return
+
+        debug = bgr.copy()
+
+        if candidate is not None:
+            x0, y0, x1, y1 = candidate['bbox']
+
+            cv2.rectangle(
+                debug,
+                (x0, y0),
+                (x1, y1),
+                (255, 0, 255),
+                2,
+            )
+
+            text = '%s HSV candidate c=%.2f' % (
+                candidate['color'],
+                candidate['confidence'],
+            )
+
+            cv2.putText(
+                debug,
+                text,
+                (x0, max(18, y0 - 6)),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.50,
+                (255, 0, 255),
+                2,
+            )
+
+        try:
+            pub.publish(
+                self.bridge.cv2_to_imgmsg(
+                    debug,
+                    encoding='bgr8',
+                )
+            )
+        except Exception:
+            pass
+
+
+    def _update_color_candidate(self, name, bgr):
+        """Update confirmation/clearing state for HSV color candidates."""
+
+        if not bool(self.color_cfg.get('enabled', False)):
+            return
+
+        detect_rate_hz = max(
+            0.1,
+            float(self.color_cfg.get('detect_rate_hz', 5.0)),
+        )
+
+        wall = now_wall()
+
+        with self.lock:
+            state = self.states[name]
+
+            if (
+                wall - float(
+                    state.get('last_color_detection_wall', 0.0)
+                )
+                < 1.0 / detect_rate_hz
+            ):
+                return
+
+            state['last_color_detection_wall'] = wall
+
+        candidate = self._detect_color_candidate(bgr)
+
+        self._publish_color_debug(name, bgr, candidate)
+
+        confirm_frames = max(
+            1,
+            int(self.color_cfg.get('confirm_frames', 2)),
+        )
+
+        clear_frames = max(
+            1,
+            int(self.color_cfg.get('clear_frames', 3)),
+        )
+
+        publish_candidate = None
+
+        with self.lock:
+            state = self.states[name]
+
+            previous = state.get('color_candidate') or {}
+            previous_color = str(previous.get('color', ''))
+
+            if candidate is not None:
+                # 若颜色类别发生变化，重新开始确认。
+                if previous_color != str(candidate['color']):
+                    state['color_hits'] = 1
+                    state['color_trigger_consumed'] = False
+                    state['color_candidate_reported'] = False
+                else:
+                    state['color_hits'] = int(
+                        state.get('color_hits', 0)
+                    ) + 1
+
+                state['color_clears'] = 0
+                state['color_candidate'] = candidate
+
+                if (
+                    state['color_hits'] >= confirm_frames
+                    and not bool(
+                        state.get('color_trigger_consumed', False)
+                    )
+                ):
+                    state['color_trigger_pending'] = True
+
+                if (
+                    state['color_hits'] >= confirm_frames
+                    and not bool(
+                        state.get('color_candidate_reported', False)
+                    )
+                ):
+                    state['color_candidate_reported'] = True
+                    publish_candidate = dict(candidate)
+
+            else:
+                state['color_clears'] = int(
+                    state.get('color_clears', 0)
+                ) + 1
+
+                if state['color_clears'] >= clear_frames:
+                    state['color_candidate'] = None
+                    state['color_hits'] = 0
+                    state['color_trigger_pending'] = False
+                    state['color_trigger_consumed'] = False
+                    state['color_candidate_reported'] = False
+
+        if publish_candidate is not None:
+            self.color_candidate_pub.publish(
+                compact_json({
+                    'robot_id': name,
+                    'candidate': publish_candidate,
+                    'status': 'CONFIRMED_COLOR_CANDIDATE',
+                })
+            )
+
+            rospy.loginfo(
+                '%s detected stable %s color candidate: bbox=%s, area=%.1f.',
+                name,
+                publish_candidate['color'],
+                publish_candidate['bbox'],
+                publish_candidate['area_px'],
+            )
+
+    def _depth_cb(self, name, msg):
+        try:
+            depth = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
+        except Exception:
+            return
+        with self.lock:
+            self.states[name]['depth'] = np.array(depth, copy=True)
+
+    def _info_cb(self, name, msg):
+        with self.lock:
+            self.states[name]['camera_info'] = msg
+
+    def _reached_cb(self, name, msg):
+        """Consume a raw executor completion only for an armed dispatched goal.
+
+        Executors deliberately publish False when they accept any mission goal,
+        then True when they are inside tolerance.  Therefore raw False->True
+        edges alone are insufficient: a repeated zero-displacement goal would
+        re-trigger VLM epochs forever.  The validator dispatch event arms one
+        completion only for a *new*, motion-requiring task.
+        """
+        current = bool(msg.data)
+        with self.lock:
+            state = self.states[name]
+            previous = bool(state.get('reached_level', False))
+            state['reached_level'] = current
+            if (current and not previous and bool(state.get('completion_armed', False))
+                    and state.get('completion_pending_dispatch')
+                    and state.get('last_completed_dispatch') != state.get('completion_pending_dispatch')):
+                state['goal_reached'] = True
+                state['completion_armed'] = False
+                state['last_completed_dispatch'] = state.get('completion_pending_dispatch')
+
+    def _local_ready_cb(self, name, msg):
+        with self.lock:
+            self.states[name]['local_vlm_ready'] = bool(msg.data)
+
+    @staticmethod
+    def _dispatch_signature(dispatch):
+        goal = dispatch.get('goal') or {}
+        return '%s|%s|%.3f|%.3f|%.3f|%.3f' % (
+            dispatch.get('candidate_id', ''), dispatch.get('task_type', ''),
+            float(goal.get('x', 0.0)), float(goal.get('y', 0.0)),
+            float(goal.get('z', 0.0)), float(goal.get('yaw_rad', 0.0)))
+
+    def _goal_dispatch_cb(self, msg):
+        dispatch = safe_json_loads(msg.data, None)
+        if not isinstance(dispatch, dict):
+            return
+        name = str(dispatch.get('robot_id', ''))
+        if name not in self.states:
+            return
+        task_type = str(dispatch.get('task_type', '')).upper()
+        signature = self._dispatch_signature(dispatch)
+        trigger_tasks = {str(x).upper() for x in self.cfg.get(
+            'goal_completion_trigger_task_types',
+            ['EXPLORE', 'INSPECT', 'GROUND_VERIFY', 'AERIAL_INSPECT'])}
+        with self.lock:
+            state = self.states[name]
+            # Republished identical plans must not re-arm the completion event.
+            if signature == state.get('last_dispatch_signature'):
+                return
+            state['last_dispatch_signature'] = signature
+            state['last_dispatch_task_type'] = task_type
+            state['goal_reached'] = False
+            state['reached_level'] = False
+            state['completion_pending_dispatch'] = signature
+            state['completion_armed'] = task_type in trigger_tasks
+            # A zero-displacement scan/hold is already semantically handled in
+            # its dispatch epoch, so it must not create a new GOAL_REACHED epoch.
+            if not state['completion_armed']:
+                rospy.loginfo('VLM completion gate disarmed for %s task=%s candidate=%s.',
+                              name, task_type, dispatch.get('candidate_id', ''))
+
+    def _blocked_cb(self, name, msg):
+        current = bool(msg.data)
+
+        with self.lock:
+            state = self.states[name]
+            previous = bool(state.get('blocked', False))
+
+            state['blocked'] = current
+
+            # 仅记录 false → true 的阻塞边沿。
+            if current and not previous:
+                state['blocked_event_pending'] = True
+
+            # 清除后才允许下一次新的阻塞事件重新触发。
+            if not current:
+                state['blocked_event_pending'] = False
+                state['blocked_event_consumed'] = False
+
+    def _takeoff_cb(self, name, msg):
+        with self.lock:
+            self.states[name]['takeoff_ready'] = bool(msg.data)
+
+    def _map_cb(self, key, msg):
+        with self.lock:
+            self.maps[key] = msg
+
+    def _epoch_cb(self, msg):
+        with self.lock:
+            self.epoch_active = bool(msg.data)
+
+    def _query_cb(self, msg):
+        """Handle latched initial target query without producing a false epoch.
+
+        target_query_manager publishes the active query with latch=True during
+        startup.  Every new scheduler subscriber receives that message once.
+        It initializes local state only; an epoch is emitted only for a later
+        operator update after INITIAL_CONTEXT_READY has completed.
+        """
+        query = safe_json_loads(msg.data, None)
+        if not isinstance(query, dict):
+            return
+        with self.lock:
+            first_message = not self.initial_query_received
+            self.initial_query_received = True
+            self.query = query
+            self.query_version = int(query.get('query_version', self.query_version + 1))
+            initial_fired = bool(self.initial_fired)
+            active = bool(self.epoch_active)
+            if not first_message and not initial_fired:
+                # The initial context epoch will use the newest query; no extra
+                # target-change epoch is necessary before the system is ready.
+                self.pending_query_change = False
+                self.status_pub.publish('TARGET_QUERY_UPDATED_BEFORE_INITIAL_CONTEXT:v%d' % self.query_version)
+                return
+            if first_message:
+                self.status_pub.publish('TARGET_QUERY_INITIALIZED:v%d' % self.query_version)
+                return
+            if active:
+                # Preserve a real user update that arrives while another epoch
+                # is running; _tick will emit it after the active epoch ends.
+                self.pending_query_change = True
+                self.status_pub.publish('TARGET_QUERY_CHANGE_QUEUED:v%d' % self.query_version)
+                return
+        if not self._emit('TARGET_QUERY_CHANGE', 'all', {'query_version': self.query_version}):
+            with self.lock:
+                self.pending_query_change = True
+
+    def _semantic_cb(self, msg):
+        report = safe_json_loads(msg.data, None)
+        if not isinstance(report, dict):
+            return
+        name = report.get('robot_id')
+        if name not in self.states:
+            return
+        with self.lock:
+            state = self.states[name]
+            state['last_sem_pose'] = state['pose']
+            state['last_sem_yaw'] = yaw_from_pose(state['pose']) if state['pose'] is not None else None
+            state['last_sem_hist'] = normalized_hsv_histogram(state['image'])
+            state['last_sem_coverage'] = {tuple(cell) for cell in report.get('coverage_cells', []) if isinstance(cell, list) and len(cell) == 2}
+            map_key = 'ugv' if self.robot_by_name[name].get('type') == 'ugv' else 'uav'
+            grid = grid_from_msg(self.maps.get(map_key))
+            state['last_free_count'] = int((grid.data == 0).sum()) if grid is not None else 0
+            # A local semantic report must not clear a pending goal-completion
+            # event; completion is consumed only after the scheduler emits it.
+            state['blocked'] = False
+            # When a cloud VLM request fails or falls back to mock output, keep
+            # the geometry/visual baselines but suppress automatic retriggers for
+            # this robot. Otherwise a slow endpoint creates a failure -> retrigger
+            # loop as soon as the robot moves a few cells.
+            report_status = str(report.get('status', 'OK')).upper()
+            if report_status != 'OK' or report.get('backend_error'):
+                cooldown = float(self.cfg.get('backend_failure_cooldown_sec', 60.0))
+                state['cooldown_until'] = max(float(state.get('cooldown_until', 0.0)), now_wall() + cooldown)
+                rospy.logwarn('VLM scheduler cooldown for %s: %.1fs after local report status=%s.',
+                              name, cooldown, report_status)
+
+    def _ready(self) -> bool:
+        for robot in self.robots:
+            st = self.states[robot['name']]
+            if st['pose'] is None or st['image'] is None or st['depth'] is None or st['camera_info'] is None:
+                return False
+        if bool(self.cfg.get('require_all_local_vlm_ready', True)):
+            for robot in self.robots:
+                if not self.states[robot['name']].get('local_vlm_ready', False):
+                    return False
+        if self.maps['uav'] is None or self.maps['ugv'] is None:
+            return False
+        if bool(self.cfg.get('require_all_uav_takeoff_ready', True)):
+            for robot in self.robots:
+                if robot.get('type') == 'uav' and not self.states[robot['name']].get('takeoff_ready', False):
+                    return False
+        ug = grid_from_msg(self.maps['uav'])
+        gg = grid_from_msg(self.maps['ugv'])
+        return bool(ug and gg and int((ug.data >= 0).sum()) >= int(self.cfg.get('min_known_cells_uav', 20)) and
+                    int((gg.data >= 0).sum()) >= int(self.cfg.get('min_known_cells_ugv', 20)))
+
+    @staticmethod
+    def _distance(a: PoseStamped, b: PoseStamped) -> float:
+        return float(math.hypot(a.pose.position.x-b.pose.position.x, a.pose.position.y-b.pose.position.y))
+
+    def _current_coverage(self, robot, state, grid):
+        return set(tuple(c) for c in sampled_depth_coverage_cells(
+            robot, state['pose'], state['camera_info'], state['depth'], grid,
+            int(self.cfg.get('coverage_depth_stride_px', 32)),
+            float(self.local_cfg.get('min_depth_m', 0.30)),
+            float(self.local_cfg.get('max_depth_m', 8.0)),
+            int(self.cfg.get('max_coverage_cells_per_observation', 280))))
+
+    def _topology_signature(self, grid, pose: PoseStamped, radius_m: float) -> Optional[tuple]:
+        if grid is None or pose is None:
+            return None
+        cell = grid.world_to_cell(pose.pose.position.x, pose.pose.position.y)
+        if cell is None:
+            return None
+        radius = max(1, int(radius_m / grid.resolution))
+        sectors = []
+        for idx in range(16):
+            theta = 2.0 * math.pi * idx / 16.0
+            x = int(round(cell[0] + radius * math.cos(theta)))
+            y = int(round(cell[1] + radius * math.sin(theta)))
+            if 0 <= x < grid.width and 0 <= y < grid.height:
+                sectors.append(1 if grid.data[y, x] == 0 else 0)
+            else:
+                sectors.append(0)
+        branches = 0
+        for i, value in enumerate(sectors):
+            previous = sectors[i - 1]
+            if value and not previous:
+                branches += 1
+        free_local = int((grid.data[max(0, cell[1]-radius):min(grid.height, cell[1]+radius+1),
+                                    max(0, cell[0]-radius):min(grid.width, cell[0]+radius+1)] == 0).sum())
+        return (branches, free_local // 8)
+
+    def _emit(self, reason: str, robot_id: str, details: Optional[Dict[str, Any]] = None) -> bool:
+        with self.lock:
+            if self.epoch_active:
+                return False
+            wall = now_wall()
+            bypass_interval = (
+                reason == 'TARGET_QUERY_CHANGE'
+                or (str(reason).startswith('COLOR_CANDIDATE_') and bool(self.color_cfg.get('bypass_min_trigger_interval',True,))))
+
+            if (
+                not bypass_interval
+                and wall - self.last_trigger_wall
+                < float(self.cfg.get('min_trigger_interval_sec', 2.0))
+            ):
+                return False
+            epoch = 'epoch_%s' % uuid.uuid4().hex[:10]
+            event = {
+                'epoch_id': epoch,
+                'reason': reason,
+                'robot_id': robot_id,
+                'query': self.query,
+                'query_version': self.query_version,
+                'details': details or {},
+                'trigger_wall_time': wall,
+            }
+            self.last_trigger_wall = wall
+        self.trigger_pub.publish(compact_json(event))
+        self.status_pub.publish('TRIGGERED:%s:%s' % (reason, robot_id))
+        rospy.loginfo('VLM trigger: %s from %s', reason, robot_id)
+        return True
+
+    def _tick(self, _event):
+        with self.lock:
+            if self.epoch_active:
+                return
+            ready = self._ready()
+        if not ready:
+            self.status_pub.publish('WAITING_FOR_READY_CONTEXT')
+            return
+        if not self.initial_fired:
+            self.initial_fired = True
+            self._emit('INITIAL_CONTEXT_READY', 'all')
+            return
+        with self.lock:
+            if self.pending_query_change:
+                self.pending_query_change = False
+                if self._emit('TARGET_QUERY_CHANGE', 'all', {'query_version': self.query_version}):
+                    return
+                self.pending_query_change = True
+                return
+            for robot in self.robots:
+                name = robot['name']
+                st = self.states[name]
+                map_key = 'ugv' if robot.get('type') == 'ugv' else 'uav'
+                grid = grid_from_msg(self.maps[map_key])
+                if grid is None or st['pose'] is None:
+                    continue
+
+                # -------------------------------------------------------------
+                # 最高优先级：真实执行阻塞。
+                # blocked_event_pending 只会在 blocked 从 False 变为 True 时置位，
+                # 因此同一次阻塞不会反复触发 Central / Local VLM。
+                # -------------------------------------------------------------
+                if (
+                        bool(self.cfg.get('trigger_on_robot_blocked', True))
+                        and st.get('blocked_event_pending', False)
+                        and not st.get('blocked_event_consumed', False)
+                ):
+                    if self._emit('ROBOT_BLOCKED', name):
+                        st['blocked_event_consumed'] = True
+                        return
+
+                # -------------------------------------------------------------
+                # 第二优先级：检测到稳定的颜色候选区域。
+                # HSV 检测只负责发现候选区域；真正判断是不是目标由 Local VLM 完成。
+                # color_trigger_pending 会在连续 confirm_frames 帧检测到红色区域后置为 True。
+                # -------------------------------------------------------------
+                if (
+                        bool(self.cfg.get('trigger_on_color_candidate', True))
+                        and st.get('color_trigger_pending', False)
+                ):
+                    color_candidate = st.get('color_candidate')
+
+                    if isinstance(color_candidate, dict):
+                        color_name = str(
+                            color_candidate.get('color', 'unknown')
+                        ).upper()
+
+                        trigger_reason = 'COLOR_CANDIDATE_%s' % color_name
+
+                        if self._emit(
+                                trigger_reason,
+                                name,
+                                {
+                                    'color_candidate': dict(color_candidate),
+                                }
+                        ):
+                            # 只有 trigger 成功发出后才清除 pending。
+                            # consumed=True 表示同一红色物体持续出现在视野中时，
+                            # 不会每一个 scheduler tick 都反复调用 Local VLM。
+                            st['color_trigger_pending'] = False
+                            st['color_trigger_consumed'] = True
+                            return
+
+                # -------------------------------------------------------------
+                # 第三优先级：机器人到达当前任务终点。
+                # -------------------------------------------------------------
+                if (
+                        bool(self.cfg.get('trigger_on_goal_reached', True))
+                        and st['goal_reached']
+                ):
+                    details = {
+                        'dispatch_signature': st.get('last_completed_dispatch'),
+                        'task_type': st.get('last_dispatch_task_type', ''),
+                    }
+
+                    if self._emit('GOAL_REACHED', name, details):
+                        st['goal_reached'] = False
+                        return
+                    
+                if st['last_sem_pose'] is None:
+                    continue
+                # GOAL_REACHED and ROBOT_BLOCKED above remain high-priority.  All
+                # ordinary automatic triggers respect the per-robot backend
+                # cooldown after a failed/timeout VLM call.
+                if now_wall() < float(st.get('cooldown_until', 0.0)):
+                    continue
+                travel = self._distance(st['pose'], st['last_sem_pose'])
+                threshold = float(self.cfg.get('ugv_distance_trigger_m' if robot.get('type') == 'ugv' else 'uav_distance_trigger_m', 0.5))
+                if bool(self.cfg.get('trigger_on_distance_in_uncertain_space', True)) and travel >= threshold:
+                    self._emit('DISTANCE_IN_UNCERTAIN_SPACE', name, {'travel_m': round(travel, 3)})
+                    return
+                yaw_delta = abs(math.atan2(math.sin(yaw_from_pose(st['pose']) - float(st['last_sem_yaw'])),
+                                           math.cos(yaw_from_pose(st['pose']) - float(st['last_sem_yaw']))))
+                yaw_threshold = math.radians(float(self.cfg.get('ugv_yaw_trigger_deg' if robot.get('type') == 'ugv' else 'uav_yaw_trigger_deg', 35.0)))
+                if bool(self.cfg.get('trigger_on_new_observation_sector', True)) and yaw_delta >= yaw_threshold:
+                    coverage = self._current_coverage(robot, st, grid)
+                    previous = st['last_sem_coverage']
+                    gain = len(coverage - previous) / max(1, len(coverage))
+                    if gain >= float(self.cfg.get('semantic_coverage_gain_trigger', 0.32)):
+                        self._emit('NEW_OBSERVATION_SECTOR', name, {'coverage_gain': round(gain, 3)})
+                        return
+                hist = normalized_hsv_histogram(st['image'])
+                novelty = histogram_novelty(hist, st['last_sem_hist'])
+                if bool(self.cfg.get('trigger_on_visual_novelty', True)) and novelty >= float(self.cfg.get('visual_novelty_hist_trigger', 0.28)):
+                    self._emit('VISUAL_NOVELTY', name, {'histogram_novelty': round(novelty, 3)})
+                    return
+                free_count = int((grid.data == 0).sum())
+                if bool(self.cfg.get('trigger_on_map_free_space_expanded', True)) and free_count - int(st['last_free_count']) >= int(self.cfg.get('map_new_free_cells_trigger', 28)):
+                    st['last_free_count'] = free_count
+                    self._emit('MAP_FREE_SPACE_EXPANDED', name, {'new_free_cells': free_count})
+                    return
+                signature = self._topology_signature(grid, st['pose'], float(self.cfg.get('local_free_sector_radius_m', 1.2)))
+                old = st['topology_signature']
+                st['topology_signature'] = signature
+                if bool(self.cfg.get('trigger_on_topology_cue_changed', self.cfg.get('topology_signature_change_trigger', True))) and old is not None and signature is not None:
+                    if signature[0] >= int(self.cfg.get('branch_sector_count_trigger', 2)) and signature != old:
+                        self._emit('TOPOLOGY_CUE_CHANGED', name, {'old': old, 'new': signature})
+                        return
+
+
+def main():
+    rospy.init_node('vlm_trigger_scheduler')
+    TriggerScheduler()
+    rospy.spin()
+
+
+if __name__ == '__main__':
+    main()

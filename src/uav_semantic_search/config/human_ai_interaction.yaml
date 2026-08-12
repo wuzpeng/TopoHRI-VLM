@@ -1,0 +1,14 @@
+# Independent HRI configuration.  It intentionally does not overwrite the
+# existing /vlm_semantic_search dictionary or its backend/API configuration.
+human_ai_interaction:
+  frame_id: map
+  max_regions: 12
+  max_action_history: 100
+  max_feedback_history: 80
+
+  # Defaults applied by human_interaction_manager.py when the GUI does not
+  # explicitly provide a field.
+  default_region_priority: 0.80
+  default_region_mode: soft       # soft | hard
+  default_max_robots: 1
+  default_region_ttl_sec: 0.0     # 0 = persists until operator removes it

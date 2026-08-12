@@ -1,0 +1,16 @@
+# Baseline fixed corridor flight. This verifies PX4/MAVROS goal execution.
+mission:
+  uav0:
+    - {x: 2.0,  y: -0.70, z: 1.80, yaw_deg: 0.0}
+    - {x: 8.0,  y: -0.70, z: 1.80, yaw_deg: 0.0}
+    - {x: 14.0, y: -0.70, z: 1.80, yaw_deg: 0.0}
+    - {x: 20.0, y: -0.70, z: 1.80, yaw_deg: 0.0}
+    - {x: 27.0, y: -0.70, z: 1.80, yaw_deg: 0.0}
+  uav1:
+    - {x: 2.0,  y: 0.70, z: 2.20, yaw_deg: 0.0}
+    - {x: 8.0,  y: 0.70, z: 2.20, yaw_deg: 0.0}
+    - {x: 14.0, y: 0.70, z: 2.20, yaw_deg: 0.0}
+    - {x: 20.0, y: 0.70, z: 2.20, yaw_deg: 0.0}
+    - {x: 27.0, y: 0.70, z: 2.20, yaw_deg: 0.0}
+hold_seconds: 1.0
+start_delay_seconds: 5.0

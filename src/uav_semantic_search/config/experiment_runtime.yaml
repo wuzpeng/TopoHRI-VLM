@@ -1,0 +1,25 @@
+experiment_runtime:
+  # Transform every LiDAR cloud with map<-lidar at cloud.header.stamp.
+  # A cloud without a matching timestamped transform is not fused with a stale pose.
+  mapping_time_sync:
+    tf_cache_sec: 10.0
+    tf_lookup_timeout_sec: 0.12
+    drop_cloud_without_transform: true
+    override_cloud_frame_from_robot_config: true
+    status_publish_period_sec: 2.0
+
+  # Smooth path-heading yaw. Intermediate A* poses face the next segment and
+  # the final pose faces the unknown side of the selected frontier.
+  uav_yaw_control:
+    enabled: true
+    max_yaw_rate_rad_s: 0.55
+    yaw_tolerance_rad: 0.08
+    # The UAV translates while yaw turns toward the flight direction.
+    rotate_before_translate: false
+    rotate_before_move_threshold_rad: 0.30
+    # Start blending toward the following segment before reaching a corner.
+    path_yaw_lookahead_m: 1.0
+    # Near the endpoint, blend travel yaw into the frontier observation yaw.
+    final_yaw_blend_distance_m: 2.0
+    final_yaw_tolerance_rad: 0.14
+    final_observation_dwell_sec: 0.0

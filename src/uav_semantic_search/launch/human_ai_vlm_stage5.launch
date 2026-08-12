@@ -1,0 +1,58 @@
+<launch>
+  <!-- Human–AI extension for the existing Stage-5 VLM semantic-search stack.
+       The underlying autonomy stack remains unchanged except for the supplied
+       replacement scripts. -->
+  <arg name="autostart" default="true"/>
+  <arg name="uav0_fcu_url" default="udp://:24540@127.0.0.1:34580"/>
+  <arg name="uav1_fcu_url" default="udp://:24541@127.0.0.1:34581"/>
+  <arg name="enable_hsv_baseline_detector" default="false"/>
+  <!-- Metrics are passive and enabled by default.  Keeping run_name empty lets
+       the logger create a unique <map_id>_<timestamp> trial directory. -->
+  <arg name="record_metrics" default="true"/>
+  <arg name="metrics_dir" default="~/harp_sar_ws/experiment_results"/>
+  <arg name="run_name" default=""/>
+  <arg name="enable_hri_dashboard" default="true"/>
+  <arg name="enable_topology_planning" default="true"/>
+  <arg name="enable_state_action_gate" default="true"/>
+  <arg name="enable_trajectory_visualization" default="true"/>
+
+  <arg name="experiment_config" default="$(find uav_semantic_search)/config/experiments/h1.yaml"/>
+
+  <rosparam command="load" file="$(find uav_semantic_search)/config/human_ai_interaction.yaml"/>
+
+  <include file="$(find uav_semantic_search)/launch/heterogeneous_vlm_stage5.launch">
+    <arg name="experiment_config" value="$(arg experiment_config)"/>
+    <arg name="autostart" value="$(arg autostart)"/>
+    <arg name="uav0_fcu_url" value="$(arg uav0_fcu_url)"/>
+    <arg name="uav1_fcu_url" value="$(arg uav1_fcu_url)"/>
+    <arg name="enable_hsv_baseline_detector" value="$(arg enable_hsv_baseline_detector)"/>
+    <arg name="record_metrics" value="$(arg record_metrics)"/>
+    <arg name="metrics_dir" value="$(arg metrics_dir)"/>
+    <arg name="run_name" value="$(arg run_name)"/>
+    <arg name="enable_topology_planning" value="$(arg enable_topology_planning)"/>
+    <arg name="enable_state_action_gate" value="$(arg enable_state_action_gate)"/>
+  </include>
+
+  <!-- The manager is started after the base stack.  /hri/shared_context is
+       latched, so CentralVLMPlanner and the fallback planner receive the active
+       human intent even if they were initialized earlier. -->
+  <node pkg="uav_semantic_search" type="human_interaction_manager.py"
+        name="human_interaction_manager" output="screen"/>
+
+  <node if="$(arg enable_hri_dashboard)" pkg="uav_semantic_search"
+        type="human_ai_dashboard.py" name="human_ai_dashboard" output="screen"/>
+
+  <node if="$(arg enable_trajectory_visualization)" pkg="uav_semantic_search"
+        type="robot_trajectory_visualizer.py" name="robot_trajectory_visualizer"
+        output="screen">
+    <rosparam param="robots">[uav0, uav1, ugv0]</rosparam>
+    <param name="min_sample_distance_m" value="0.08"/>
+    <param name="overlap_radius_m" value="0.30"/>
+    <param name="publish_rate_hz" value="2.0"/>
+    <rosparam param="colours">
+      uav0: [0.10, 0.45, 1.00]
+      uav1: [1.00, 0.20, 0.15]
+      ugv0: [0.10, 0.80, 0.30]
+    </rosparam>
+  </node>
+</launch>
