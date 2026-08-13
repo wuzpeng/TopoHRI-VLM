@@ -11,17 +11,17 @@ The current system is developed and evaluated with **two UAVs and one UGV** in G
 <table>
   <tr>
     <td align="center" width="33%">
-      <img src="./figures/UI_1.png" width="100%">
+      <img src="./figures/UI_Human Input.png" width="100%">
       <br>
       <em>Human Input</em>
     </td>
     <td align="center" width="33%">
-      <img src="./figures/UI_2.png" width="100%">
+      <img src="./figures/UI_Robot Perception.png" width="100%">
       <br>
       <em>Robot Perception</em>
     </td>
     <td align="center" width="33%">
-      <img src="./figures/UI_3.png" width="100%">
+      <img src="./figures/UI_AI Decision Feedback.png" width="100%">
       <br>
       <em>AI Decision Feedback</em>
     </td>
