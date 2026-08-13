@@ -6,6 +6,31 @@ TopoHRI-VLM is a ROS-based multi-robot semantic search framework for initially u
 
 The current system is developed and evaluated with **two UAVs and one UGV** in Gazebo.
 
+**Human-AI Interface:**
+
+<table>
+  <tr>
+    <td align="center" width="33%">
+      <img src="./figures/UI_1.png" width="100%">
+      <br>
+      <em>Human Input</em>
+    </td>
+    <td align="center" width="33%">
+      <img src="./figures/UI_2.png" width="100%">
+      <br>
+      <em>Robot Perception</em>
+    </td>
+    <td align="center" width="33%">
+      <img src="./figures/UI_3.png" width="100%">
+      <br>
+      <em>AI Decision Feedback</em>
+    </td>
+  </tr>
+</table>
+
+**Simulation Experiments**
+
+
 ## Features
 
 - **Topology-aware frontier exploration** for reducing redundant multi-robot search.
