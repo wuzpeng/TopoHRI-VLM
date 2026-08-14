@@ -28,7 +28,28 @@ The current system is developed and evaluated with **two UAVs and one UGV** in G
   </tr>
 </table>
 
-- The **videos of simulation and real-world experiment** results are available in **figures/**
+The **videos of simulation and real-world experiment** results are available in **figures/**
+  
+<div align="center">
+  <table>
+    <tr>
+      <td align="center">
+        <img src="./figures/Real Office-1.gif"
+             alt="Real-world experiment 1"
+             height="260">
+        <br>
+        <em>Real-world Experiment 1</em>
+      </td>
+      <td align="center">
+        <img src="./figures/Real Office-2.gif"
+             alt="Real-world experiment 2"
+             height="260">
+        <br>
+        <em>Real-world Experiment 2</em>
+      </td>
+    </tr>
+  </table>
+</div>
 
 
 ## Features
